@@ -40,30 +40,6 @@
 </style>
 </head>
 <body>
-<!-- Local 20GB Mirror File Selection Overlay -->
-<div id="archive-picker-overlay" style="
-  position: absolute; top: 0; left: 0; width: 100vw; height: 100vh;
-  background: rgba(0, 0, 0, 0.92); display: flex; flex-direction: column;
-  justify-content: center; align-items: center; z-index: 99999; color: #fff;
-  font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-">
-  <div style="background: #1c1c1e; padding: 28px; border-radius: 14px; max-width: 420px; width: 85%; text-align: center; border: 1px solid #333;">
-    <h2 style="margin: 0 0 10px 0; font-size: 1.4rem;">Load Game Mirror</h2>
-    <p style="color: #aaa; font-size: 0.85rem; line-height: 1.4; margin-bottom: 24px;">
-      Select your local 20 GB <code>.tar</code> or <code>.zip</code> archive stored in the iPad Files app.
-    </p>
-    <label for="mirrorFileInput" style="
-      display: inline-block; background: #007aff; color: white;
-      padding: 12px 24px; border-radius: 8px; font-weight: 600; cursor: pointer;
-    ">
-      Choose Mirror File
-    </label>
-    <input type="file" id="mirrorFileInput" accept=".tar,.zip,.mirror" style="display: none;" />
-    <div id="fileStatus" style="margin-top: 16px; font-size: 0.85rem; color: #888; font-family: monospace;">
-      No file loaded.
-    </div>
-  </div>
-</div>
 
 <canvas id="canvas" width="800" height="600" tabindex="-1"></canvas>
 <div id="hud"></div>
