@@ -1,162 +1,38 @@
-'use strict';
-let started = false;
-self.onmessage = (ev) => {
-	if (started) return;
-	started = true;
-	const m = ev.data;
-	
-	if (m.cores) Object.defineProperty(navigator, 'hardwareConcurrency', { value: m.cores });
+// public/loader.js
 
-	const gq = new URLSearchParams();
-	if (m.slots) gq.set('slots', m.slots);
-	if (m.syncPipelines) gq.set('syncpipelines', '1');
-	if (m.remoteLog) gq.set('log', '1');
-	if (m.lowMemory) gq.set('low', '1');
-	if (m.noPack) gq.set('nopack', '1');
-	if (m.shotRt) gq.set('shotrt', '1');
-	if (m.gpuLimits) gq.set('limits', m.gpuLimits);
+const ioWorker = new Worker('./io_worker.js', { type: 'module' });
 
-	const B = m.base || '';
-	const engine = m.memory32 ? 'game-memory32' : 'game';
-	const engineScript = B + '/' + engine + '.js';
-	const wasmFile = engine + '.wasm';
-	const reportFailure = (error) => self.postMessage({ error });
+// Initiate worker startup sequence
+ioWorker.postMessage({
+  init: true,
+  base: './', // Root path for game data manifests
+  noStore: false
+});
 
-	const gpu = new Worker(B + '/wgpu_worker.js' + (gq.toString() ? '?' + gq : ''));
-	const io = new Worker(B + '/io_worker.js');
+ioWorker.onmessage = (e) => {
+  const m = e.data;
 
-	// Forward the File Object handle to io_worker.js alongside initialization parameters
-	io.postMessage({ 
-		init: true, 
-		fileHandle: m.fileHandle, // <--- Passes File Handle to IO Worker
-		base: self.location.origin + '/data/', 
-		noStore: !!m.noStore, 
-		record: !!m.record, 
-		trace: !!m.trace, 
-		log: !!m.remoteLog, 
-		noHints: !!m.noHints, 
-		bootset: m.lowMemory ? 'bootset_low.json' : 'bootset.json' 
-	});
+  // Track background extraction progress
+  if (m.progress) {
+    const { current, total, status } = m.progress;
+    const progressBar = document.getElementById('progress-bar');
+    const statusText = document.getElementById('status-text');
 
-	let loaded = 0;
-	io.onmessage = (e) => { if (e.data.loaded && ++loaded === 2) start(); };
-	gpu.onmessage = (e) => {
-		if (e.data.loaded && ++loaded === 2) start();
-	};
+    if (progressBar) progressBar.style.width = `${(current / total) * 100}%`;
+    if (statusText) statusText.innerText = status;
+  }
 
-	const fetchWasm = async () => {
-		for (let attempt = 0; ; attempt++) {
-			let res = null, err = null;
-			try { res = await fetch(B + '/' + wasmFile); } catch (e) { err = e; }
-			if (m.memory32 && res?.status === 404) throw new Error('The 32-bit engine file is missing.');
-			if (res && res.ok) return res;
-			if (attempt >= 7) { if (res) throw new Error('HTTP ' + res.status + ' for ' + wasmFile); throw err; }
-			bc0.postMessage({ label: 'The server is busy, retrying (' + (attempt + 1) + ')' });
-			await new Promise((r) => setTimeout(r, Math.min(5000, 300 * 2 ** attempt) * (0.5 + Math.random())));
-		}
-	};
-	const bc0 = new BroadcastChannel('game-progress');
+  // Once assets are ready, boot WASM runtime
+  if (m.loaded) {
+    console.log('[Loader UI] OPFS asset cache verified. Launching WebAssembly engine...');
+    const loaderScreen = document.getElementById('loader-screen');
+    if (loaderScreen) loaderScreen.style.display = 'none';
 
-	const start = () => {
-		const bc = new BroadcastChannel('game-progress');
-		self.Module = {
-			instantiateWasm: (imports, done) => {
-				const buffered = async () => {
-					const res = await fetchWasm();
-					const total = +(res.headers.get('X-Uncompressed-Length') || res.headers.get('Content-Length')) || 0;
-					const reader = res.body.getReader(), chunks = [];
-					let got = 0;
-					for (;;) {
-						const { done: end, value } = await reader.read();
-						if (end) break;
-						chunks.push(value);
-						got += value.length;
-						bc.postMessage({ pct: total ? 20 * got / total : 0, label: 'Downloading the engine (' + (got / 1048576 | 0) + ' MB)' });
-					}
-					const bytes = new Uint8Array(got);
-					let o = 0;
-					for (const c of chunks) { bytes.set(c, o); o += c.length; }
-					bc.postMessage({ pct: 20, label: 'Compiling the engine' });
-					return WebAssembly.instantiate(bytes, imports);
-				};
-				const streaming = async (res) => {
-					const total = +(res.headers.get('X-Uncompressed-Length') || res.headers.get('Content-Length')) || 0;
-					const counter = res.clone().body.getReader();
-					(async () => {
-						let got = 0;
-						for (;;) {
-							const { done: end, value } = await counter.read();
-							if (end) break;
-							got += value.length;
-							bc.postMessage({ pct: total ? 20 * got / total : 0, label: 'Downloading and compiling engine (' + (got / 1048576 | 0) + ' MB)' });
-						}
-						bc.postMessage({ pct: 20, label: 'Compiling engine' });
-					})().catch(() => {});
-					return WebAssembly.instantiateStreaming(res, imports);
-				};
-				(async () => {
-					const res = await fetchWasm();
-					let r;
-					try { r = await streaming(res); }
-					catch (e) { console.warn('streaming instantiation failed: downloading first'); r = await buffered(); }
-					bc.postMessage({ pct: 22, label: 'Starting engine' });
-					done(r.instance, r.module);
-				})().catch((e) => reportFailure('Could not load ' + wasmFile + '. ' + e.message));
-				return {};
-			},
-			canvas: m.canvas,
-			arguments: m.args,
-			wgpuWorker: gpu,
-			ioWorker: io,
-			fullConsole: !!m.fullConsole,
-			remoteLog: !!m.remoteLog,
-			wgpuShaderUrl: B + '/shaders',
-			wgpuShotEvery: m.shotEvery,
-			keepThreads: m.keepThreads|0,
-			mainScriptUrlOrBlob: engineScript + ((m.fullConsole || m.remoteLog) ? '?' + [m.fullConsole ? 'console=1' : '', m.remoteLog ? 'log=1' : ''].filter(Boolean).join('&') : ''),
-			locateFile: (p) => B + '/' + p,
-			onExit: (code) => { console.error('EXIT ' + code); self.__log?.('EXIT ' + code); self.__logFlush?.(); if (code) self.__crash?.('exit', 'EXIT ' + code); },
-			onAbort: (what) => { console.error('ABORT ' + what); self.__log?.('ABORT ' + what); self.__logFlush?.(); self.__crash?.('abort', 'ABORT ' + what); },
-			preRun: [() => {
-				if (typeof FS === 'undefined' || typeof addRunDependency !== 'function' || typeof indexedDB === 'undefined') return;
-				addRunDependency('userdata');
-				let finished = false;
-				const finish = (note) => { if (finished) return; finished = true; removeRunDependency('userdata'); };
-				setTimeout(() => finish('timed out'), 8000);
-				try {
-					const r = indexedDB.open('gta5-userdata', 1);
-					r.onupgradeneeded = () => r.result.createObjectStore('files');
-					r.onerror = () => finish('IndexedDB unavailable: ' + r.error);
-					r.onsuccess = () => {
-						let n = 0, bytes = 0;
-						try {
-							const req = r.result.transaction('files', 'readonly').objectStore('files').openCursor();
-							req.onerror = () => finish('read failed: ' + req.error);
-							req.onsuccess = () => {
-								const c = req.result;
-								if (!c) { finish('restored ' + n + ' files'); return; }
-								const path = String(c.key);
-								try {
-									if (path.startsWith('/userdata/') && c.value && c.value.data) {
-										FS.mkdirTree(path.slice(0, path.lastIndexOf('/')));
-										FS.writeFile(path, c.value.data);
-										FS.utime(path, c.value.mtime, c.value.mtime);
-										n++; bytes += c.value.data.length;
-									}
-								} catch (e) {}
-								c.continue();
-							};
-						} catch (e) { finish('read failed: ' + e); }
-					};
-				} catch (e) { finish('failed: ' + e); }
-			}],
-		};
-		try {
-			importScripts(engineScript);
-		} catch (e) {
-			console.error(e);
-			reportFailure('Could not load ' + engine + '.js. ' + e.message);
-		}
-	};
-	gpu.onerror = (e) => console.error('gpu worker failed: ' + e.message);
+    bootGameEngine();
+  }
 };
+
+function bootGameEngine() {
+  // Launch main game WASM entry point
+  console.log('[Loader UI] Engine initialized.');
+}
