@@ -67,22 +67,30 @@
 
 <script type="module">
 const q = new URLSearchParams(location.search);
+const localZipMode = q.get('localzip') === '1' || q.get('localzips') === '1';
 const LOCAL_ZIP_PART1_KEY = 'gta-local-zip-part1-base';
 const LOCAL_ZIP_REST_KEY = 'gta-local-zip-rest-base';
 function normalizeLocalZipBase(value) {
 	const url = new URL(value);
-	if (url.protocol !== 'http:' || !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname) || url.username || url.password || url.search || url.hash) {
-		throw new Error('Use an HTTP localhost URL without credentials, query, or fragment.');
+	if (!['http:', 'https:'].includes(url.protocol) || !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname) || url.username || url.password || url.search || url.hash) {
+		throw new Error('Use an HTTP or HTTPS localhost URL without credentials, query, or fragment.');
 	}
 	if (url.pathname.split('/').some((part) => part === '..')) throw new Error('Local ZIP paths cannot contain "..".');
 	url.pathname = url.pathname.replace(/\/+$/, '') + '/';
 	return url.href;
+}
+function getLocalZipBases() {
+	const part1 = localStorage.getItem(LOCAL_ZIP_PART1_KEY);
+	const rest = localStorage.getItem(LOCAL_ZIP_REST_KEY);
+	if (!part1 || !rest) throw new Error('Enter both local ZIP base URLs.');
+	return { part1: normalizeLocalZipBase(part1), rest: normalizeLocalZipBase(rest) };
 }
 {
 	const part1Input = document.getElementById('local-zip-part1');
 	const restInput = document.getElementById('local-zip-rest');
 	part1Input.value = localStorage.getItem(LOCAL_ZIP_PART1_KEY) || '';
 	restInput.value = localStorage.getItem(LOCAL_ZIP_REST_KEY) || '';
+	if (localZipMode) document.getElementById('local-zip-settings').open = true;
 	document.getElementById('local-zip-form').addEventListener('submit', (event) => {
 		event.preventDefault();
 		try {
@@ -90,7 +98,8 @@ function normalizeLocalZipBase(value) {
 			const restBase = normalizeLocalZipBase(restInput.value.trim());
 			localStorage.setItem(LOCAL_ZIP_PART1_KEY, part1Base);
 			localStorage.setItem(LOCAL_ZIP_REST_KEY, restBase);
-			q.set('localzips', '1');
+			q.set('localzip', '1');
+			q.delete('localzips');
 			location.search = q.toString();
 		} catch (error) {
 			failStartup(error.message);
@@ -99,6 +108,7 @@ function normalizeLocalZipBase(value) {
 	document.getElementById('clear-local-zip').addEventListener('click', () => {
 		localStorage.removeItem(LOCAL_ZIP_PART1_KEY);
 		localStorage.removeItem(LOCAL_ZIP_REST_KEY);
+		q.delete('localzip');
 		q.delete('localzips');
 		location.search = q.toString();
 	});
@@ -111,6 +121,14 @@ function failStartup(message) {
 	hud.setAttribute('role', 'alert');
 	hud.textContent = message;
 	document.getElementById('ls-bars')?.setAttribute('hidden', '');
+}
+if (localZipMode) {
+	try {
+		getLocalZipBases();
+	} catch (error) {
+		document.getElementById('local-zip-settings').open = true;
+		failStartup(error.message + ' Save them before starting the game.');
+	}
 }
 const BASE = '/b/8b0b5899ed'.charAt(0) === '_' ? '' : '/b/8b0b5899ed';
 const remoteLog = q.get('log') === '1';
@@ -448,6 +466,16 @@ let startSize = [1280, 720], wantSize = null;
 
 // File Picker Integration: Function to launch the loader worker once a file is selected
 function launchLoaderWorker(selectedFile) {
+	let localZipBases = null;
+	if (localZipMode) {
+		try {
+			localZipBases = getLocalZipBases();
+		} catch (error) {
+			document.getElementById('local-zip-settings').open = true;
+			failStartup(error.message + ' Save them before starting the game.');
+			return;
+		}
+	}
 	if (!crossOriginIsolated || typeof SharedArrayBuffer !== 'function') {
 		failStartup('Shared memory requires HTTPS (or localhost) and COOP/COEP headers.');
 		return;
@@ -484,17 +512,10 @@ function launchLoaderWorker(selectedFile) {
 	const tickTimer = setInterval(() => {}, 1);
 
 	const workerUrl = new URL(BASE + '/loader.js', location.href);
-	if (q.get('localzips') === '1') {
-		const part1Base = localStorage.getItem(LOCAL_ZIP_PART1_KEY);
-		const restBase = localStorage.getItem(LOCAL_ZIP_REST_KEY);
-		if (!part1Base || !restBase) {
-			failStartup('Enter both local ZIP base URLs in "Use your local ZIP files", save them, then reload.');
-			clearInterval(tickTimer);
-			return;
-		}
-		workerUrl.searchParams.set('localzips', '1');
-		workerUrl.searchParams.set('zip1', part1Base);
-		workerUrl.searchParams.set('ziprest', restBase);
+	if (localZipBases) {
+		workerUrl.searchParams.set('localzip', '1');
+		workerUrl.searchParams.set('zip1', localZipBases.part1);
+		workerUrl.searchParams.set('ziprest', localZipBases.rest);
 	}
 	const worker = new Worker(workerUrl);
 	worker.onmessage = (ev) => {

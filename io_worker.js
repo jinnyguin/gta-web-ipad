@@ -171,7 +171,8 @@ const PROXY_PART_01_URL = '/release-proxy/v1/playgta5-part-01-of-14.zip';
 const PROXY_PARTS_BASE_URL = '/release-proxy/v2/playgta5-part-';
 const LOCAL_ZIP_PROXY = 'http://127.0.0.1:8000';
 const ioWorkerUrl = new URL(self.location.href);
-const useLocalZipProxy = ioWorkerUrl.searchParams.get('localzips') === '1';
+const useLocalZipProxy = ioWorkerUrl.searchParams.get('localzip') === '1'
+  || ioWorkerUrl.searchParams.get('localzips') === '1';
 const localZipPart1Base = ioWorkerUrl.searchParams.get('zip1') || '';
 const localZipRestBase = ioWorkerUrl.searchParams.get('ziprest') || '';
 

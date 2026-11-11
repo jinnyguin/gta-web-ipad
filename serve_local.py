@@ -119,9 +119,9 @@ class LocalBuildHandler(Handler):
 
     def zip_source_url(self, base_url, part):
         source = urlsplit(base_url)
-        if (source.scheme != 'http' or source.hostname not in ('localhost', '127.0.0.1', '::1')
+        if (source.scheme not in ('http', 'https') or source.hostname not in ('localhost', '127.0.0.1', '::1')
                 or source.username or source.password or source.query or source.fragment):
-            raise ValueError('ZIP base must be an HTTP localhost URL without credentials, query, or fragment')
+            raise ValueError('ZIP base must be an HTTP or HTTPS localhost URL without credentials, query, or fragment')
         if any(unquote(segment) in ('.', '..') for segment in source.path.split('/')):
             raise ValueError('ZIP base path cannot contain dot segments')
         try:
