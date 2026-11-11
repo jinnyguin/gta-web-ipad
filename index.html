@@ -70,6 +70,7 @@ const q = new URLSearchParams(location.search);
 const localZipMode = q.get('localzip') === '1' || q.get('localzips') === '1';
 const LOCAL_ZIP_PART1_KEY = 'gta-local-zip-part1-base';
 const LOCAL_ZIP_REST_KEY = 'gta-local-zip-rest-base';
+
 function normalizeZipBase(value) {
     const url = new URL(value);
     if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
@@ -83,7 +84,7 @@ function getLocalZipBases() {
 	const part1 = localStorage.getItem(LOCAL_ZIP_PART1_KEY);
 	const rest = localStorage.getItem(LOCAL_ZIP_REST_KEY);
 	if (!part1 || !rest) throw new Error('Enter both local ZIP base URLs.');
-	return { part1: normalizeLocalZipBase(part1), rest: normalizeLocalZipBase(rest) };
+	return { part1: normalizeZipBase(part1), rest: normalizeZipBase(rest) };
 }
 {
 	const part1Input = document.getElementById('local-zip-part1');
@@ -94,8 +95,8 @@ function getLocalZipBases() {
 	document.getElementById('local-zip-form').addEventListener('submit', (event) => {
 		event.preventDefault();
 		try {
-			const part1Base = normalizeLocalZipBase(part1Input.value.trim());
-			const restBase = normalizeLocalZipBase(restInput.value.trim());
+			const part1Base = normalizeZipBase(part1Input.value.trim());
+			const restBase = normalizeZipBase(restInput.value.trim());
 			localStorage.setItem(LOCAL_ZIP_PART1_KEY, part1Base);
 			localStorage.setItem(LOCAL_ZIP_REST_KEY, restBase);
 			q.set('localzip', '1');
