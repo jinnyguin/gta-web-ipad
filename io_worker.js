@@ -19,6 +19,9 @@
 //   hint ring (4 words per entry): file id, offset low, offset high, length (written last; 0 = free): a read the engine has queued and will perform later, one at a time (the
 //   streamer's single reader thread); fetching it now, HINT_PAR at a time, turns ~3 reads/s (one round trip each) into as many as the link carries. See drainHints.
 'use strict';
+
+import { Unzip, unzipSync } from 'https://cdn.jsdelivr.net/npm/fflate@0.8.2/esm/browser.js';
+
 let mem, HEAP32, HEAPU8, table;
 let files = [], base = '', bc = null, pendingBytes = 0, lastPost = 0, noHints = false, dataQuery = '';		// noHints: ?nohints=1 (diagnostics), see drainHints; dataQuery: ?v=<manifest version> on every data URL
 // Store block size 4 KB. The engine mounts ~1,200 archives at boot and reads only each one's table of contents (16 bytes, the entries, the names: median 3 KB, 4.9 MB for all
@@ -84,7 +87,7 @@ function noteRequest(off, len) {
 function report(n) {
 	pendingBytes += n;
 	const now = performance.now();
-	if (now - lastPost > 400) { lastPost = now; bc.postMessage({ dl: pendingBytes }); pendingBytes = 0; }
+	if (now - lastPost > 400) { lastPost = now; if (bc) bc.postMessage({ dl: pendingBytes }); pendingBytes = 0; }
 }
 
 // ---- persistent store --------------------------------------------------------------------------------------------------------------------------------------
@@ -159,6 +162,123 @@ async function openStore(version) {
 		sh = jh = null;
 		log('[io] no persistent store (' + e.message + '): blocks are cached in memory only');
 	}
+}
+
+// ---- Automated Multi-Part ZIP Extraction Pipeline --------------------------------------------------------------------------------------------------------
+const TOTAL_PARTS = 14;
+const MANIFEST_NAME = 'file-inventory.json';
+const PART_01_URL = '/release-proxy/v1.0/playgta5-part-01.zip';
+const PARTS_BASE_URL = '/release-proxy/v1.0/playgta5-part-';
+
+async function verifyOPFSCache(rootDir) {
+  try {
+    const manifestHandle = await rootDir.getFileHandle(MANIFEST_NAME);
+    return !!manifestHandle;
+  } catch (err) {
+    return false;
+  }
+}
+
+async function downloadAndExtractPipeline(rootDir) {
+  for (let i = 1; i <= TOTAL_PARTS; i++) {
+    const fileUrl = (i === 1) ? PART_01_URL : `${PARTS_BASE_URL}${String(i).padStart(2, '0')}.zip`;
+
+    self.postMessage({
+      progress: {
+        current: i,
+        total: TOTAL_PARTS,
+        status: `Downloading & Extracting Part ${i} of ${TOTAL_PARTS}`
+      }
+    });
+
+    log(`[io_worker] Fetching release stream: ${fileUrl}`);
+    const response = await fetch(fileUrl);
+    if (!response.ok) throw new Error(`HTTP ${response.status} downloading part ${i}`);
+
+    if (i === 1) {
+      const part1Buffer = new Uint8Array(await response.arrayBuffer());
+      await extractPartOneHeaders(part1Buffer, rootDir);
+    } else {
+      await decompressZipStream(response.body, rootDir);
+    }
+  }
+}
+
+async function extractPartOneHeaders(uint8Buffer, rootDir) {
+  const unzipped = unzipSync(uint8Buffer);
+  const savePromises = [];
+
+  for (const [filePath, fileData] of Object.entries(unzipped)) {
+    if (!filePath.endsWith('/') && fileData.length > 0) {
+      const cleanPath = filePath.replace(/^\.?\//, '');
+      savePromises.push(saveFileToOPFS(rootDir, cleanPath, fileData));
+    }
+  }
+  await Promise.all(savePromises);
+}
+
+function decompressZipStream(stream, rootDir) {
+  return new Promise((resolve, reject) => {
+    const unzip = new Unzip((file) => {
+      if (file.name.endsWith('/')) return;
+
+      const relativePath = file.name.replace(/^\.?\//, '');
+      let fileData = [];
+
+      file.ondata = (err, chunk, final) => {
+        if (err) return reject(err);
+        fileData.push(chunk);
+
+        if (final) {
+          const completeBuffer = concatTypedArrays(fileData);
+          saveFileToOPFS(rootDir, relativePath, completeBuffer).catch(reject);
+        }
+      };
+      file.start();
+    });
+
+    const reader = stream.getReader();
+    function readChunk() {
+      reader.read().then(({ done, value }) => {
+        if (done) {
+          unzip.flush();
+          resolve();
+          return;
+        }
+        unzip.push(value);
+        readChunk();
+      }).catch(reject);
+    }
+    readChunk();
+  });
+}
+
+async function saveFileToOPFS(rootDir, filePath, uint8Data) {
+  const parts = filePath.split('/');
+  const filename = parts.pop();
+  let currentDir = rootDir;
+
+  for (const part of parts) {
+    if (part && part !== '.') {
+      currentDir = await currentDir.getDirectoryHandle(part, { create: true });
+    }
+  }
+
+  const fileHandle = await currentDir.getFileHandle(filename, { create: true });
+  const writable = await fileHandle.createWritable();
+  await writable.write(uint8Data);
+  await writable.close();
+}
+
+function concatTypedArrays(arrays) {
+  let totalLength = arrays.reduce((acc, curr) => acc + curr.length, 0);
+  let output = new Uint8Array(totalLength);
+  let length = 0;
+  for (let array of arrays) {
+    output.set(array, length);
+    length += array.length;
+  }
+  return output;
 }
 
 // ---- boot read set: recorded with ?record=1, replayed at page load ----------------------------------------------------------------------------------------
@@ -586,6 +706,15 @@ async function loop() {
 let ready = null;
 async function init(m) {
 	base = m.base; bc = new BroadcastChannel('game-progress'); remoteLog = !!m.log; noHints = !!m.noHints;
+	
+	// Automated OPFS asset unpack check before initializing engine files
+	const rootDir = await navigator.storage.getDirectory();
+	const isCached = await verifyOPFSCache(rootDir);
+	if (!isCached) {
+		log('[io_worker] Pre-cache missing. Starting automated 14-part stream...');
+		await downloadAndExtractPipeline(rootDir);
+	}
+
 	const j = await (await fetchRetry(base + 'manifest.json', { cache: 'no-store' })).json();
 	files = j.files.map((f) => ({ path: f[0], size: f[1] }));
 	dataQuery = j.version ? '?v=' + encodeURIComponent(j.version) : ''; dataVersion = j.version ? String(j.version) : '';
