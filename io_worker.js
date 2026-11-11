@@ -167,8 +167,8 @@ async function openStore(version) {
 // ---- Automated Multi-Part ZIP Extraction Pipeline --------------------------------------------------------------------------------------------------------
 const TOTAL_PARTS = 14;
 const MANIFEST_NAME = 'file-inventory.json';
-const PART_01_URL = '/release-proxy/v1.0/playgta5-part-01.zip';
-const PARTS_BASE_URL = '/release-proxy/v1.0/playgta5-part-';
+const PART_01_URL = 'https://github.com/jinnyguin/gta-web-ipad/releases/download/files/playgta5-part-01-of-14.zip';
+const PARTS_BASE_URL = 'https://github.com/alihammoud21/playgta5/releases/download/full-game-v1/playgta5-part-';
 
 async function verifyOPFSCache(rootDir) {
   try {
@@ -181,7 +181,9 @@ async function verifyOPFSCache(rootDir) {
 
 async function downloadAndExtractPipeline(rootDir) {
   for (let i = 1; i <= TOTAL_PARTS; i++) {
-    const fileUrl = (i === 1) ? PART_01_URL : `${PARTS_BASE_URL}${String(i).padStart(2, '0')}.zip`;
+    // Generates: /release-proxy/v1.0/playgta5-part-01-of-14.zip, part-02-of-14.zip, etc.
+    const partNum = String(i).padStart(2, '0');
+    const fileUrl = `${PARTS_BASE_URL}${partNum}-of-${TOTAL_PARTS}.zip`;
 
     self.postMessage({
       progress: {
