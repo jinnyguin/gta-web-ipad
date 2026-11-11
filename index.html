@@ -70,14 +70,14 @@ const q = new URLSearchParams(location.search);
 const localZipMode = q.get('localzip') === '1' || q.get('localzips') === '1';
 const LOCAL_ZIP_PART1_KEY = 'gta-local-zip-part1-base';
 const LOCAL_ZIP_REST_KEY = 'gta-local-zip-rest-base';
-function normalizeLocalZipBase(value) {
-	const url = new URL(value);
-	if (!['http:', 'https:'].includes(url.protocol) || !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname) || url.username || url.password || url.search || url.hash) {
-		throw new Error('Use an HTTP or HTTPS localhost URL without credentials, query, or fragment.');
-	}
-	if (url.pathname.split('/').some((part) => part === '..')) throw new Error('Local ZIP paths cannot contain "..".');
-	url.pathname = url.pathname.replace(/\/+$/, '') + '/';
-	return url.href;
+function normalizeZipBase(value) {
+    const url = new URL(value);
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
+        throw new Error('Use an HTTP or HTTPS URL without credentials, query, or fragment.');
+    }
+    if (url.pathname.split('/').some((part) => part === '..')) throw new Error('ZIP paths cannot contain "..".');
+    url.pathname = url.pathname.replace(/\/+$/, '') + '/';
+    return url.href;
 }
 function getLocalZipBases() {
 	const part1 = localStorage.getItem(LOCAL_ZIP_PART1_KEY);
