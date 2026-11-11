@@ -2,37 +2,44 @@
 
 const ioWorker = new Worker('./io_worker.js', { type: 'module' });
 
-// Initiate worker startup sequence
+// Boot worker and pass engine parameters
 ioWorker.postMessage({
   init: true,
-  base: './', // Root path for game data manifests
+  base: './',
   noStore: false
 });
 
 ioWorker.onmessage = (e) => {
   const m = e.data;
 
-  // Track background extraction progress
+  // 1. Update your existing game progress bar & status text
   if (m.progress) {
     const { current, total, status } = m.progress;
-    const progressBar = document.getElementById('progress-bar');
-    const statusText = document.getElementById('status-text');
+    const progressPercent = (current / total) * 100;
 
-    if (progressBar) progressBar.style.width = `${(current / total) * 100}%`;
-    if (statusText) statusText.innerText = status;
+    // Map to your original HTML elements
+    const progressBar = document.getElementById('progress-bar') || document.querySelector('.progress-fill');
+    const statusText = document.getElementById('status-text') || document.querySelector('.loading-status');
+
+    if (progressBar) progressBar.style.width = `${progressPercent}%`;
+    if (statusText) statusText.innerText = `${status} (${Math.round(progressPercent)}%)`;
   }
 
-  // Once assets are ready, boot WASM runtime
+  // 2. Hide loading screen and reveal game canvas when OPFS is ready
   if (m.loaded) {
-    console.log('[Loader UI] OPFS asset cache verified. Launching WebAssembly engine...');
-    const loaderScreen = document.getElementById('loader-screen');
-    if (loaderScreen) loaderScreen.style.display = 'none';
+    console.log('[Loader UI] Assets verified in OPFS. Booting game engine...');
+
+    // Fade out or hide your original loading screen wrapper
+    const loadingScreen = document.getElementById('loading-screen') || document.getElementById('loader-screen');
+    if (loadingScreen) {
+      loadingScreen.style.opacity = '0';
+      setTimeout(() => { loadingScreen.style.display = 'none'; }, 500);
+    }
 
     bootGameEngine();
   }
 };
 
 function bootGameEngine() {
-  // Launch main game WASM entry point
-  console.log('[Loader UI] Engine initialized.');
+  console.log('[Loader UI] Game engine initializing...');
 }
