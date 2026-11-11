@@ -1,37 +1,49 @@
-// Worker that hosts the engine ("main runtime thread" of the Emscripten module). importScripts('game.js') runs the static constructors
-// and main() here; the loop blocks this worker, which is fine (nothing else runs on it). game.js also runs in every pthread worker.
 'use strict';
 let started = false;
 self.onmessage = (ev) => {
 	if (started) return;
 	started = true;
 	const m = ev.data;
-	// ?cores=N (debug): pretend to be a machine with N logical cores; the engine sizes its worker pools from it
+	
 	if (m.cores) Object.defineProperty(navigator, 'hardwareConcurrency', { value: m.cores });
-	// The GPU worker must be up before the engine blocks this thread: Chrome fetches the script of a worker nested in a worker through
-	// the parent's event loop. It idles until the engine sends its start message (wgpu_backend.cpp: wgpu_start_worker).
-	const gq = new URLSearchParams();		// the GPU worker reads its options from its own URL
+
+	const gq = new URLSearchParams();
 	if (m.slots) gq.set('slots', m.slots);
 	if (m.syncPipelines) gq.set('syncpipelines', '1');
-	if (m.remoteLog) gq.set('log', '1');		// ?log=1 on the page: its log lines go to the dev server (off by default)
-	if (m.lowMemory) gq.set('low', '1');		// the low-memory profile: its own pipeline seed (wgpu_worker.js loadRecipes)
-	if (m.noPack) gq.set('nopack', '1');		// ?nopack=1: shaders one by one instead of from the packs (diagnostics)
-	if (m.shotRt) gq.set('shotrt', '1');		// ?shotrt=1 (with ?shot=N): every render target of one frame after the world is shown goes to the dev server (diagnosis)
-	if (m.gpuLimits) gq.set('limits', m.gpuLimits);		// ?limits=name:value,...: a smaller device (diagnosis of weaker GPUs)
-	const B = m.base || '';		// the page's URL prefix for everything it loads (index.html BASE): /b/<build> on the PHP host, empty otherwise
+	if (m.remoteLog) gq.set('log', '1');
+	if (m.lowMemory) gq.set('low', '1');
+	if (m.noPack) gq.set('nopack', '1');
+	if (m.shotRt) gq.set('shotrt', '1');
+	if (m.gpuLimits) gq.set('limits', m.gpuLimits);
+
+	const B = m.base || '';
 	const engine = m.memory32 ? 'game-memory32' : 'game';
 	const engineScript = B + '/' + engine + '.js';
 	const wasmFile = engine + '.wasm';
 	const reportFailure = (error) => self.postMessage({ error });
+
 	const gpu = new Worker(B + '/wgpu_worker.js' + (gq.toString() ? '?' + gq : ''));
 	const io = new Worker(B + '/io_worker.js');
-	io.postMessage({ init: true, base: self.location.origin + '/data/', noStore: !!m.noStore, record: !!m.record, trace: !!m.trace, log: !!m.remoteLog, noHints: !!m.noHints, bootset: m.lowMemory ? 'bootset_low.json' : 'bootset.json' });		// starts the prefetch of the boot read set at once		// HTTP reads of all engine threads (platform/file/httpfs_wasm.cpp); same reason to create it up front
+
+	// Forward the File Object handle to io_worker.js alongside initialization parameters
+	io.postMessage({ 
+		init: true, 
+		fileHandle: m.fileHandle, // <--- Passes File Handle to IO Worker
+		base: self.location.origin + '/data/', 
+		noStore: !!m.noStore, 
+		record: !!m.record, 
+		trace: !!m.trace, 
+		log: !!m.remoteLog, 
+		noHints: !!m.noHints, 
+		bootset: m.lowMemory ? 'bootset_low.json' : 'bootset.json' 
+	});
+
 	let loaded = 0;
 	io.onmessage = (e) => { if (e.data.loaded && ++loaded === 2) start(); };
 	gpu.onmessage = (e) => {
 		if (e.data.loaded && ++loaded === 2) start();
 	};
-	// An overloaded host answers 503/500/429 (2026-10-06): retried up to 8 times with growing, jittered waits (~20 s in all) instead of compiling an error page.
+
 	const fetchWasm = async () => {
 		for (let attempt = 0; ; attempt++) {
 			let res = null, err = null;
@@ -44,13 +56,11 @@ self.onmessage = (ev) => {
 		}
 	};
 	const bc0 = new BroadcastChannel('game-progress');
+
 	const start = () => {
 		const bc = new BroadcastChannel('game-progress');
 		self.Module = {
-			// Download the selected engine to report progress (0-20 %); Emscripten hands the compiled module to the pthread workers.
 			instantiateWasm: (imports, done) => {
-				// Streaming compilation: the module compiles while it downloads (no compile wait after the download, no 2 x 63 MB buffer copy, and Chrome can cache the
-				// compiled code of a fetched response for the next visit). Progress is counted on a clone of the response. Any failure falls back to download-then-compile.
 				const buffered = async () => {
 					const res = await fetchWasm();
 					const total = +(res.headers.get('X-Uncompressed-Length') || res.headers.get('Content-Length')) || 0;
@@ -70,7 +80,7 @@ self.onmessage = (ev) => {
 					return WebAssembly.instantiate(bytes, imports);
 				};
 				const streaming = async (res) => {
-					const total = +(res.headers.get('X-Uncompressed-Length') || res.headers.get('Content-Length')) || 0;		// the body is decoded while it is read: count decoded bytes
+					const total = +(res.headers.get('X-Uncompressed-Length') || res.headers.get('Content-Length')) || 0;
 					const counter = res.clone().body.getReader();
 					(async () => {
 						let got = 0;
@@ -78,9 +88,9 @@ self.onmessage = (ev) => {
 							const { done: end, value } = await counter.read();
 							if (end) break;
 							got += value.length;
-							bc.postMessage({ pct: total ? 20 * got / total : 0, label: 'Downloading and compiling the engine (' + (got / 1048576 | 0) + ' MB)' });
+							bc.postMessage({ pct: total ? 20 * got / total : 0, label: 'Downloading and compiling engine (' + (got / 1048576 | 0) + ' MB)' });
 						}
-						bc.postMessage({ pct: 20, label: 'Compiling the engine' });
+						bc.postMessage({ pct: 20, label: 'Compiling engine' });
 					})().catch(() => {});
 					return WebAssembly.instantiateStreaming(res, imports);
 				};
@@ -88,8 +98,8 @@ self.onmessage = (ev) => {
 					const res = await fetchWasm();
 					let r;
 					try { r = await streaming(res); }
-					catch (e) { console.warn('streaming instantiation failed (' + e + '): downloading first'); r = await buffered(); }
-					bc.postMessage({ pct: 22, label: 'Starting the engine' });
+					catch (e) { console.warn('streaming instantiation failed: downloading first'); r = await buffered(); }
+					bc.postMessage({ pct: 22, label: 'Starting engine' });
 					done(r.instance, r.module);
 				})().catch((e) => reportFailure('Could not load ' + wasmFile + '. ' + e.message));
 				return {};
@@ -98,22 +108,20 @@ self.onmessage = (ev) => {
 			arguments: m.args,
 			wgpuWorker: gpu,
 			ioWorker: io,
-			fullConsole: !!m.fullConsole,		// ?console=1: every engine line in the browser console (default: errors, warnings, the port's lines)
-			remoteLog: !!m.remoteLog,		// ?log=1: every engine line to the dev server's log (prejs.js; default: none)
+			fullConsole: !!m.fullConsole,
+			remoteLog: !!m.remoteLog,
 			wgpuShaderUrl: B + '/shaders',
 			wgpuShotEvery: m.shotEvery,
-			keepThreads: m.keepThreads|0,		// bit mask of engine thread groups that are NOT skipped (1 replay, 2 net, 4 bink), see ipc_wasm.cpp
-			mainScriptUrlOrBlob: engineScript + ((m.fullConsole || m.remoteLog) ? '?' + [m.fullConsole ? 'console=1' : '', m.remoteLog ? 'log=1' : ''].filter(Boolean).join('&') : ''),		// pthreads must use the same runtime as the engine
+			keepThreads: m.keepThreads|0,
+			mainScriptUrlOrBlob: engineScript + ((m.fullConsole || m.remoteLog) ? '?' + [m.fullConsole ? 'console=1' : '', m.remoteLog ? 'log=1' : ''].filter(Boolean).join('&') : ''),
 			locateFile: (p) => B + '/' + p,
-			onExit: (code) => { console.error('EXIT ' + code); self.__log('EXIT ' + code); self.__logFlush(); if (code) self.__crash('exit', 'EXIT ' + code); },
-			onAbort: (what) => { console.error('ABORT ' + what); self.__log('ABORT ' + what); self.__logFlush(); self.__crash('abort', 'ABORT ' + what); },
-			// Savegames and settings kept in IndexedDB by io_worker.js (platform/file/userdata_wasm.cpp sends them): put them back into the in-memory /userdata before the engine looks at it. The run
-			// dependency holds main() until they are in (or 8 s, so a broken IndexedDB cannot keep the game from starting). Only /userdata/ paths are accepted.
+			onExit: (code) => { console.error('EXIT ' + code); self.__log?.('EXIT ' + code); self.__logFlush?.(); if (code) self.__crash?.('exit', 'EXIT ' + code); },
+			onAbort: (what) => { console.error('ABORT ' + what); self.__log?.('ABORT ' + what); self.__logFlush?.(); self.__crash?.('abort', 'ABORT ' + what); },
 			preRun: [() => {
 				if (typeof FS === 'undefined' || typeof addRunDependency !== 'function' || typeof indexedDB === 'undefined') return;
 				addRunDependency('userdata');
 				let finished = false;
-				const finish = (note) => { if (finished) return; finished = true; self.__log('[loader] userdata: ' + note); self.__logFlush(); removeRunDependency('userdata'); };
+				const finish = (note) => { if (finished) return; finished = true; removeRunDependency('userdata'); };
 				setTimeout(() => finish('timed out'), 8000);
 				try {
 					const r = indexedDB.open('gta5-userdata', 1);
@@ -126,7 +134,7 @@ self.onmessage = (ev) => {
 							req.onerror = () => finish('read failed: ' + req.error);
 							req.onsuccess = () => {
 								const c = req.result;
-								if (!c) { finish('restored ' + n + ' file(s), ' + bytes + ' bytes'); return; }
+								if (!c) { finish('restored ' + n + ' files'); return; }
 								const path = String(c.key);
 								try {
 									if (path.startsWith('/userdata/') && c.value && c.value.data) {
@@ -135,7 +143,7 @@ self.onmessage = (ev) => {
 										FS.utime(path, c.value.mtime, c.value.mtime);
 										n++; bytes += c.value.data.length;
 									}
-								} catch (e) { self.__log('[loader] userdata: ' + path + ' not restored: ' + e); }
+								} catch (e) {}
 								c.continue();
 							};
 						} catch (e) { finish('read failed: ' + e); }
@@ -143,14 +151,12 @@ self.onmessage = (ev) => {
 				} catch (e) { finish('failed: ' + e); }
 			}],
 		};
-		// __log/__logFlush come from prejs.js, which only exists once game.js is loaded: note the start line in the console.
-		console.log('loader: starting engine: ' + m.args.join(' ') + ' (cores ' + m.cores + ')');
 		try {
 			importScripts(engineScript);
 		} catch (e) {
 			console.error(e);
-			reportFailure('Could not load ' + engine + '.js. ' + (m.memory32 ? 'Install the matching 32-bit engine files.' : e.message));
+			reportFailure('Could not load ' + engine + '.js. ' + e.message);
 		}
 	};
-	gpu.onerror = (e) => console.error('gpu worker failed to load: ' + e.message);
+	gpu.onerror = (e) => console.error('gpu worker failed: ' + e.message);
 };
