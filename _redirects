@@ -1,2 +1,2 @@
-# Bypasses CORS by proxying /release-proxy/* requests directly to GitHub Releases
-/release-proxy/* https://github.com/YOUR_GITHUB_USERNAME/YOUR_REPO/releases/download/:splat 200
+/release-proxy/v1/* https://github.com/jinnyguin/gta-web-ipad/releases/download/files/:splat 200
+/release-proxy/v2/* https://github.com/alihammoud21/playgta5/releases/download/full-game-v1/:splat 200
