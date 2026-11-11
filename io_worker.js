@@ -181,9 +181,9 @@ async function verifyOPFSCache(rootDir) {
 
 async function downloadAndExtractPipeline(rootDir) {
   for (let i = 1; i <= TOTAL_PARTS; i++) {
-    const fileUrl = i === 1 
-      ? PART_01_URL 
-      : `${PARTS_BASE_URL}${String(i).padStart(2, '0')}-of-${TOTAL_PARTS}.zip`;
+    const fileUrl = i === 1
+      ? PROXY_PART_01_URL
+      : `${PROXY_PARTS_BASE_URL}${String(i).padStart(2, '0')}-of-${TOTAL_PARTS}.zip`;
 
     console.log(`[io_worker] Current target URL (Part ${i}/${TOTAL_PARTS}):`, fileUrl);
 
