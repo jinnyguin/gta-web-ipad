@@ -181,9 +181,11 @@ async function verifyOPFSCache(rootDir) {
 
 async function downloadAndExtractPipeline(rootDir) {
   for (let i = 1; i <= TOTAL_PARTS; i++) {
-    // Generates: /release-proxy/v1.0/playgta5-part-01-of-14.zip, part-02-of-14.zip, etc.
-    const partNum = String(i).padStart(2, '0');
-    const fileUrl = `${PARTS_BASE_URL}${partNum}-of-${TOTAL_PARTS}.zip`;
+    const fileUrl = i === 1 
+      ? PART_01_URL 
+      : `${PARTS_BASE_URL}${String(i).padStart(2, '0')}-of-${TOTAL_PARTS}.zip`;
+
+    console.log(`[io_worker] Current target URL (Part ${i}/${TOTAL_PARTS}):`, fileUrl);
 
     self.postMessage({
       progress: {
