@@ -37,17 +37,72 @@
 	#hud { position: fixed; left: 8px; bottom: 8px; max-width: 60vw; white-space: pre-wrap; opacity: .8; pointer-events: none; }
 	#hud.startup-error { z-index: 6; max-width: calc(100vw - 36px); padding: 8px 10px; color: #f99; background: #201517; opacity: 1; }
 	#fps { position: fixed; left: 8px; top: 6px; display: none; color: #0f0; font: bold 18px/1.2 Consolas, monospace; font-variant-numeric: tabular-nums; text-shadow: 1px 1px 2px #000, 0 0 3px #000; pointer-events: none; z-index: 10; }
+	#local-zip-settings { position: fixed; top: 8px; right: 8px; z-index: 20; max-width: min(360px, calc(100vw - 32px)); padding: 8px; color: #ddd; background: #17191eee; border: 1px solid #555; }
+	#local-zip-settings summary { cursor: pointer; }
+	#local-zip-settings form { display: grid; gap: 8px; margin-top: 8px; }
+	#local-zip-settings label { display: grid; gap: 3px; }
+	#local-zip-settings input { box-sizing: border-box; width: 100%; padding: 5px; }
+	#local-zip-settings button { padding: 5px 8px; }
 </style>
 </head>
 <body>
 
 <canvas id="canvas" width="800" height="600" tabindex="-1"></canvas>
 <div id="hud"></div>
+<details id="local-zip-settings"><summary>Use your local ZIP files</summary>
+	<form id="local-zip-form">
+		<label>Part 1 base URL
+			<input id="local-zip-part1" type="url" placeholder="http://localhost:500/" required>
+		</label>
+		<label>Parts 2–14 base URL
+			<input id="local-zip-rest" type="url" placeholder="http://localhost:10000/" required>
+		</label>
+		<div>Enter localhost folders; the standard part filenames are appended.</div>
+		<button type="submit">Save local ZIP paths</button>
+		<button id="clear-local-zip" type="button">Clear saved paths</button>
+	</form>
+</details>
 <div id="loading"><div id="ls-stage"><div id="ls-screens"></div><img id="ls-logo" src="/b/8b0b5899ed/title/logo.png" alt=""><div id="ls-bars"><div id="modes" class="ls-bar"><button data-act="back"></button><button data-act="map5"></button><button data-act="map6"></button><button data-act="sandbox"></button><button data-act="story"></button></div><div class="ls-bar"><span id="label">Starting...</span><span id="pct">0%</span><i class="ls-spin"></i></div></div></div><div id="ls-log"><div id="data"></div><div id="console"></div></div><div id="bar"><div id="fill"></div></div></div>
 <div id="fps"></div>
 
 <script type="module">
 const q = new URLSearchParams(location.search);
+const LOCAL_ZIP_PART1_KEY = 'gta-local-zip-part1-base';
+const LOCAL_ZIP_REST_KEY = 'gta-local-zip-rest-base';
+function normalizeLocalZipBase(value) {
+	const url = new URL(value);
+	if (url.protocol !== 'http:' || !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname) || url.username || url.password || url.search || url.hash) {
+		throw new Error('Use an HTTP localhost URL without credentials, query, or fragment.');
+	}
+	if (url.pathname.split('/').some((part) => part === '..')) throw new Error('Local ZIP paths cannot contain "..".');
+	url.pathname = url.pathname.replace(/\/+$/, '') + '/';
+	return url.href;
+}
+{
+	const part1Input = document.getElementById('local-zip-part1');
+	const restInput = document.getElementById('local-zip-rest');
+	part1Input.value = localStorage.getItem(LOCAL_ZIP_PART1_KEY) || '';
+	restInput.value = localStorage.getItem(LOCAL_ZIP_REST_KEY) || '';
+	document.getElementById('local-zip-form').addEventListener('submit', (event) => {
+		event.preventDefault();
+		try {
+			const part1Base = normalizeLocalZipBase(part1Input.value.trim());
+			const restBase = normalizeLocalZipBase(restInput.value.trim());
+			localStorage.setItem(LOCAL_ZIP_PART1_KEY, part1Base);
+			localStorage.setItem(LOCAL_ZIP_REST_KEY, restBase);
+			q.set('localzips', '1');
+			location.search = q.toString();
+		} catch (error) {
+			failStartup(error.message);
+		}
+	});
+	document.getElementById('clear-local-zip').addEventListener('click', () => {
+		localStorage.removeItem(LOCAL_ZIP_PART1_KEY);
+		localStorage.removeItem(LOCAL_ZIP_REST_KEY);
+		q.delete('localzips');
+		location.search = q.toString();
+	});
+}
 let startupFailed = false;
 function failStartup(message) {
 	startupFailed = true;
@@ -76,6 +131,31 @@ const postLog = (text) => { if (remoteLog) fetch('/log', { method: 'POST', body:
 let stopTitle = () => {};
 {
 	const stage = document.getElementById('ls-stage'), holder = document.getElementById('ls-screens');
+	const titleAssetUrls = new Map();
+	const titleAssetsReady = new Promise((resolve) => {
+		const channel = new BroadcastChannel('game-progress');
+		channel.addEventListener('message', (event) => {
+			if (event.data?.assetsReady) {
+				channel.close();
+				resolve();
+			}
+		});
+	});
+	const titleAssetUrl = async (name) => {
+		const path = 'b/8b0b5899ed/title/art/' + name + '.webp';
+		if (!titleAssetUrls.has(path)) {
+			titleAssetUrls.set(path, (async () => {
+				await titleAssetsReady;
+				const root = await navigator.storage.getDirectory();
+				let directory = root;
+				const parts = path.split('/');
+				for (const part of parts.slice(0, -1)) directory = await directory.getDirectoryHandle(part);
+				const file = await (await directory.getFileHandle(parts[parts.length - 1])).getFile();
+				return URL.createObjectURL(file);
+			})());
+		}
+		return titleAssetUrls.get(path);
+	};
 	const fit = () => {
 		const s = Math.min(innerWidth / 1280, innerHeight / 720);
 		stage.style.transform = 'translate(' + (innerWidth - 1280 * s) / 2 + 'px,' + (innerHeight - 720 * s) / 2 + 'px) scale(' + s + ')';
@@ -116,9 +196,18 @@ let stopTitle = () => {};
 		for (const c of s.cams) c.style.perspectiveOrigin = (640 - x) + 'px 360px';
 	};
 	const place = (l, x, yr, xr) => { l.el.style.transform = 'translate3d(' + x + 'px,' + l.y + 'px,0) rotateY(' + -yr + 'deg) rotateX(' + -xr + 'deg)'; };
-	const prepare = (i) => {
-		const layers = SCREENS[order[i]].map((d) => ({ ...d, img: Object.assign(new Image(), { src: '/b/8b0b5899ed/title/art/' + d.tex + '.webp' }) }));
-		return Promise.all(layers.map((l) => l.img.decode().catch(() => {}))).then(() => layers);
+	const prepare = async (i) => {
+		const layers = await Promise.all(SCREENS[order[i]].map(async (d) => {
+			const img = new Image();
+			try {
+				img.src = await titleAssetUrl(d.tex);
+			} catch (error) {
+				console.error('[title] Could not load extracted artwork ' + d.tex + ':', error);
+			}
+			return { ...d, img };
+		}));
+		await Promise.all(layers.map((l) => l.img.decode().catch(() => {})));
+		return layers;
 	};
 	let active = null, leaving = null, index = 0, alt = -1, timer = 0, raf = 0, stopped = false;
 	const show = (defs) => {
@@ -171,7 +260,13 @@ let stopTitle = () => {};
 	});
 	timer = setTimeout(cycle, 500);
 	raf = requestAnimationFrame(tick);
-	stopTitle = () => { stopped = true; clearTimeout(timer); cancelAnimationFrame(raf); };
+	stopTitle = () => {
+		stopped = true;
+		clearTimeout(timer);
+		cancelAnimationFrame(raf);
+		for (const url of titleAssetUrls.values()) url.then((assetUrl) => URL.revokeObjectURL(assetUrl)).catch(() => {});
+		titleAssetUrls.clear();
+	};
 }
 
 let startMode = q.get('mode') === 'story' ? 1 : q.get('mode') === 'sandbox' ? (q.get('map') === 'env_test' ? 3 : 2) : 0;
@@ -388,7 +483,20 @@ function launchLoaderWorker(selectedFile) {
 	const ENGINE_ARGS = ['-fastscriptcore'];
 	const tickTimer = setInterval(() => {}, 1);
 
-	const worker = new Worker(BASE + '/loader.js');
+	const workerUrl = new URL(BASE + '/loader.js', location.href);
+	if (q.get('localzips') === '1') {
+		const part1Base = localStorage.getItem(LOCAL_ZIP_PART1_KEY);
+		const restBase = localStorage.getItem(LOCAL_ZIP_REST_KEY);
+		if (!part1Base || !restBase) {
+			failStartup('Enter both local ZIP base URLs in "Use your local ZIP files", save them, then reload.');
+			clearInterval(tickTimer);
+			return;
+		}
+		workerUrl.searchParams.set('localzips', '1');
+		workerUrl.searchParams.set('zip1', part1Base);
+		workerUrl.searchParams.set('ziprest', restBase);
+	}
+	const worker = new Worker(workerUrl);
 	worker.onmessage = (ev) => {
 		if (ev.data.error) {
 			failStartup(ev.data.error);

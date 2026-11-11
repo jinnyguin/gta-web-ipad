@@ -1,4 +1,4 @@
-# playgta5 Source Code
+osint# playgta5 Source Code
 This code is grabbed from playgta5.com before it got took down. You can run this locally or make it public hehe.
 This github page serves as archival for the original V1 port of the game,
 
@@ -46,6 +46,27 @@ And don't email me for asking the mirror folder. I will not reply to the email.
 3. Run the `Launch-Local.cmd` and it will automatically open the URL at `http://localhost:8000/`.
 
 4. Voila!
+
+## Local split-ZIP source
+
+For the Cloudflare Pages site, users can set the localhost directory URLs for
+part 1 and parts 2–14 in the **Use your local ZIP files** panel. Each directory
+must serve `playgta5-part-01-of-14.zip` or `playgta5-part-02-of-14.zip` through
+`playgta5-part-14-of-14.zip`, respectively. The paths are saved in that
+browser's local storage; use **Clear saved paths** to remove them.
+
+Run local file servers for those directories, for example:
+
+```sh
+python -m http.server 500 --bind 127.0.0.1 --directory /path/to/part-1-folder
+python -m http.server 10000 --bind 127.0.0.1 --directory /path/to/parts-2-to-14-folder
+```
+
+Keep both source servers running. Start `Launch-Local.cmd` to run the localhost
+proxy, enter their base URLs (for example `http://localhost:500/` and
+`http://localhost:10000/`), save, and reload the page. The proxy only accepts
+HTTP localhost URLs and serves the expected ZIP filename for each part; source
+servers do not need CORS enabled.
 
 ## iPhone and memory32
 

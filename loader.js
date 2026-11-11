@@ -1,6 +1,8 @@
 // public/loader.js
 
-const ioWorker = new Worker('./io_worker.js', { type: 'module' });
+const ioWorkerUrl = new URL('./io_worker.js', self.location.href);
+ioWorkerUrl.search = new URL(self.location.href).search;
+const ioWorker = new Worker(ioWorkerUrl, { type: 'module' });
 
 // Boot worker and pass engine parameters
 ioWorker.postMessage({

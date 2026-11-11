@@ -166,14 +166,19 @@ async function openStore(version) {
 
 // ---- Automated Multi-Part ZIP Extraction Pipeline --------------------------------------------------------------------------------------------------------
 const TOTAL_PARTS = 14;
-const MANIFEST_NAME = 'file-inventory.json';
+const CACHE_MARKER = 'playgta5-assets-v1.complete';
 const PROXY_PART_01_URL = '/release-proxy/v1/playgta5-part-01-of-14.zip';
 const PROXY_PARTS_BASE_URL = '/release-proxy/v2/playgta5-part-';
+const LOCAL_ZIP_PROXY = 'http://127.0.0.1:8000';
+const ioWorkerUrl = new URL(self.location.href);
+const useLocalZipProxy = ioWorkerUrl.searchParams.get('localzips') === '1';
+const localZipPart1Base = ioWorkerUrl.searchParams.get('zip1') || '';
+const localZipRestBase = ioWorkerUrl.searchParams.get('ziprest') || '';
 
 async function verifyOPFSCache(rootDir) {
   try {
-    const manifestHandle = await rootDir.getFileHandle(MANIFEST_NAME);
-    return !!manifestHandle;
+    await rootDir.getFileHandle(CACHE_MARKER);
+    return true;
   } catch (err) {
     return false;
   }
@@ -181,9 +186,11 @@ async function verifyOPFSCache(rootDir) {
 
 async function downloadAndExtractPipeline(rootDir) {
   for (let i = 1; i <= TOTAL_PARTS; i++) {
-    const fileUrl = i === 1
+    const releaseUrl = i === 1
       ? PROXY_PART_01_URL
       : `${PROXY_PARTS_BASE_URL}${String(i).padStart(2, '0')}-of-${TOTAL_PARTS}.zip`;
+    const fileUrl = new URL(useLocalZipProxy ? LOCAL_ZIP_PROXY + releaseUrl : releaseUrl, self.location.href);
+    if (useLocalZipProxy) fileUrl.searchParams.set('sourceBase', i === 1 ? localZipPart1Base : localZipRestBase);
 
     console.log(`[io_worker] Current target URL (Part ${i}/${TOTAL_PARTS}):`, fileUrl);
 
@@ -223,6 +230,15 @@ async function extractPartOneHeaders(uint8Buffer, rootDir) {
 
 function decompressZipStream(stream, rootDir) {
   return new Promise((resolve, reject) => {
+    let pendingWrites = 0, inputDone = false, failed = false;
+    const fail = (error) => {
+      if (failed) return;
+      failed = true;
+      reject(error);
+    };
+    const finish = () => {
+      if (inputDone && pendingWrites === 0 && !failed) resolve();
+    };
     const unzip = new Unzip((file) => {
       if (file.name.endsWith('/')) return;
 
@@ -230,12 +246,16 @@ function decompressZipStream(stream, rootDir) {
       let fileData = [];
 
       file.ondata = (err, chunk, final) => {
-        if (err) return reject(err);
+        if (err) return fail(err);
         fileData.push(chunk);
 
         if (final) {
           const completeBuffer = concatTypedArrays(fileData);
-          saveFileToOPFS(rootDir, relativePath, completeBuffer).catch(reject);
+          pendingWrites++;
+          saveFileToOPFS(rootDir, relativePath, completeBuffer).then(() => {
+            pendingWrites--;
+            finish();
+          }, fail);
         }
       };
       file.start();
@@ -245,13 +265,18 @@ function decompressZipStream(stream, rootDir) {
     function readChunk() {
       reader.read().then(({ done, value }) => {
         if (done) {
-          unzip.flush();
-          resolve();
+          inputDone = true;
+          try {
+            unzip.flush();
+            finish();
+          } catch (error) {
+            fail(error);
+          }
           return;
         }
         unzip.push(value);
         readChunk();
-      }).catch(reject);
+      }).catch(fail);
     }
     readChunk();
   });
@@ -717,7 +742,9 @@ async function init(m) {
 	if (!isCached) {
 		log('[io_worker] Pre-cache missing. Starting automated 14-part stream...');
 		await downloadAndExtractPipeline(rootDir);
+		await saveFileToOPFS(rootDir, CACHE_MARKER, new Uint8Array());
 	}
+	bc.postMessage({ assetsReady: true });
 
 	const j = await (await fetchRetry(base + 'manifest.json', { cache: 'no-store' })).json();
 	files = j.files.map((f) => ({ path: f[0], size: f[1] }));

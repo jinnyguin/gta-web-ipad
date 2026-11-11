@@ -2,10 +2,18 @@
 import argparse, gzip, io, json, mimetypes, re, shutil, webbrowser
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 from urllib.parse import urlsplit, unquote, parse_qs
 
 PROJECT = Path(__file__).resolve().parent
 ROOT = PROJECT / 'mirror' / 'playgta5.com'
+PAGES_ORIGIN = 'https://gta-web-ipad.pages.dev'
+class NoRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, new_url):
+        return None
+
+ZIP_OPENER = build_opener(NoRedirectHandler)
 mimetypes.add_type('application/wasm', '.wasm')
 mimetypes.add_type('text/javascript', '.js')
 
@@ -106,12 +114,90 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_error(400, str(exc))
 
 class LocalBuildHandler(Handler):
+    def zip_proxy_route(self):
+        return re.fullmatch(r'/release-proxy/v[12]/playgta5-part-(\d{2})-of-14\.zip', urlsplit(self.path).path)
+
+    def zip_source_url(self, base_url, part):
+        source = urlsplit(base_url)
+        if (source.scheme != 'http' or source.hostname not in ('localhost', '127.0.0.1', '::1')
+                or source.username or source.password or source.query or source.fragment):
+            raise ValueError('ZIP base must be an HTTP localhost URL without credentials, query, or fragment')
+        if any(unquote(segment) in ('.', '..') for segment in source.path.split('/')):
+            raise ValueError('ZIP base path cannot contain dot segments')
+        try:
+            source.port
+        except ValueError as exc:
+            raise ValueError('ZIP base has an invalid port') from exc
+        filename = 'playgta5-part-%02d-of-14.zip' % part
+        path = source.path.rstrip('/') + '/' + filename
+        return '%s://%s%s' % (source.scheme, source.netloc, path)
+
+    def end_headers(self):
+        if self.zip_proxy_route() and self.headers.get('Origin') == PAGES_ORIGIN:
+            self.send_header('Access-Control-Allow-Origin', PAGES_ORIGIN)
+            self.send_header('Access-Control-Allow-Methods', 'GET, OPTIONS')
+            self.send_header('Access-Control-Allow-Private-Network', 'true')
+            self.send_header('Vary', 'Origin')
+        super().end_headers()
+
+    def do_OPTIONS(self):
+        if not self.zip_proxy_route():
+            self.send_error(404)
+            return
+        if self.headers.get('Origin') != PAGES_ORIGIN:
+            self.send_error(403, 'Origin is not allowed')
+            return
+        self.send_response(204)
+        self.send_header('Content-Length', '0')
+        self.end_headers()
+
+    def do_GET(self):
+        match = self.zip_proxy_route()
+        if not match:
+            return super().do_GET()
+        if self.headers.get('Origin') != PAGES_ORIGIN:
+            self.send_error(403, 'Origin is not allowed')
+            return
+
+        part = int(match[1])
+        if not 1 <= part <= 14:
+            self.send_error(404)
+            return
+
+        bases = parse_qs(urlsplit(self.path).query).get('sourceBase', [])
+        if len(bases) != 1:
+            self.send_error(400, 'Provide exactly one localhost ZIP base URL')
+            return
+        try:
+            source_url = self.zip_source_url(bases[0], part)
+            with ZIP_OPENER.open(Request(source_url, headers={'Accept-Encoding': 'identity'}), timeout=30) as source:
+                self.send_response(source.status)
+                self.send_header('Content-Type', source.headers.get('Content-Type', 'application/octet-stream'))
+                if source.headers.get('Content-Length'):
+                    self.send_header('Content-Length', source.headers['Content-Length'])
+                self.send_header('Cache-Control', 'no-store')
+                self.end_headers()
+                while chunk := source.read(1024 * 1024):
+                    self.wfile.write(chunk)
+        except HTTPError as exc:
+            self.send_error(exc.code, 'Local ZIP source returned HTTP %d' % exc.code)
+        except URLError as exc:
+            self.send_error(502, 'Local ZIP source unavailable: %s' % exc.reason)
+        except ValueError as exc:
+            self.send_error(400, str(exc))
+
     def translate_path(self, path):
         route = urlsplit(path).path
         if route in ('/', '/index.html'):
             return str(PROJECT / 'homepage.html')
-        if route == '/b/8b0b5899ed/loader.js':
-            return str(PROJECT / 'loader.js')
+        build_files = {
+            '/b/8b0b5899ed/loader.js': 'loader.js',
+            '/b/8b0b5899ed/io_worker.js': 'io_worker.js',
+            '/b/8b0b5899ed/wgpu_worker.js': 'wgpu_worker.js',
+            '/b/8b0b5899ed/game.js': 'game.js',
+        }
+        if route in build_files:
+            return str(PROJECT / build_files[route])
         return super().translate_path(path)
 
 if __name__ == '__main__':
