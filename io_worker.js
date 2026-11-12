@@ -471,13 +471,13 @@ async function prefetch(name) {
 	log('[io] prefetching the boot set: ' + set.length + ' files, ' + runs.length + ' ranges, ' + batches.length + ' compressed batches');
 	let nextRun = 0, nextBatch = 0;
 	const runLane = async () => {
-		while (nextRun < runs.length) {
+		while (!navigator.onLine && nextRun < runs.length) {
 			const r = runs[nextRun++];
 			try { await ensureBlocks(r.id, r.a, r.b, true); } catch (e) { log('[io] prefetch failed: ' + e.message); }		// blocks already stored or on their way cost nothing
 		}
 	};
 	const batchLane = async () => {
-		while (nextBatch < batches.length) {
+		while (!navigator.onLine && nextBatch < batches.length) {
 			const full = batches[nextBatch++], wanted = new Set(full.filter((it) => untouched(it.id, files[it.id])).map((it) => it.id));		// files the engine already fetched meanwhile are dropped from the answer, not from the request: the request is the same for everybody
 			try { if (wanted.size) await batchFetch(full, true, wanted); } catch (e) { log('[io] prefetch failed: ' + e.message); }
 		}
@@ -663,6 +663,16 @@ async function readWithoutStore(id, off, len, dst) {
 	return done;
 }
 
+async function readFromNetwork(id, off, len, dst) {
+	const f = files[id];
+	const got = await fetchRange(f, off, off + len - 1, (chunk, at) => {
+		views();
+		HEAPU8.set(chunk, dst + at);
+	}, false, false);
+	if (got < len) shrink(f, off + got);
+	return got;
+}
+
 // ---- requests ---------------------------------------------------------------------------------------------------------------------------------------------------
 function views() {
 	if (HEAPU8.length !== mem.buffer.byteLength) { HEAP32 = new Int32Array(mem.buffer); HEAPU8 = new Uint8Array(mem.buffer); }
@@ -682,7 +692,9 @@ async function serve(slot) {
 		if (off >= f.size) result = 0;
 		else {
 			if (off + len > f.size) len = f.size - off;
-			if (sh) {
+			if (navigator.onLine) {
+				result = await readFromNetwork(id, off, len, dst);
+			} else if (sh) {
 				// read-ahead: a read that continues the previous one of this file (a sequential scan) also fetches the next bytes, doubling up to MAX_AHEAD; anything else fetches only what it needs
 				const st = seq.get(id) || { end: -1, ahead: 0 };
 				// radio and talk-radio streams (audio/sfx/RADIO_*.rpf) are read as ~33 KB blocks, one after another and each a network round trip, with nothing queued behind for the
@@ -747,7 +759,7 @@ function pumpHints() {
 }
 function drainHints(bell) {
 	const ring = Atomics.load(HEAP32, bell + 2), cap = Atomics.load(HEAP32, bell + 3);
-	if (!ring || !cap || !sh || noHints) return;		// an engine without hints, no store to fetch into, or ?nohints=1
+	if (!ring || !cap || !sh || noHints || navigator.onLine) return;		// no store to fetch into, or ?nohints=1, or online
 	const head = Atomics.load(HEAP32, bell + 4) >>> 0;
 	let tail = Atomics.load(HEAP32, bell + 5) >>> 0;
 	if (((head - tail) >>> 0) > cap) tail = (head - cap) >>> 0;		// the engine lapped us: the oldest hints were overwritten
@@ -815,8 +827,8 @@ async function init(m) {
 	recording = !!m.record; traceOn = !!m.trace;
 	if (remoteLog) startNetStats();
 	if (!m.noStore) await openStore(Number(String(j.version).replace(/\D/g, '')) || 0);
-	if (sh && m.bootset && !m.record) prefetch(m.bootset);
-	else console.info('[io] Boot-set prefetch skipped:', !sh ? 'persistent store unavailable' : 'recording mode enabled');
+	if (sh && !navigator.onLine && m.bootset && !m.record) prefetch(m.bootset);
+	else console.info('[io] Boot-set prefetch skipped:', !sh ? 'persistent store unavailable' : navigator.onLine ? 'network available' : 'recording mode enabled');
 }
 
 // The page tells us when it is going away (pagehide): close the handles at once so the next load can take them.
