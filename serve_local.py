@@ -191,6 +191,10 @@ class LocalBuildHandler(Handler):
         if route in ('/', '/index.html'):
             return str(PROJECT / 'index.html')
         build_files = {
+            '/loader.js': 'loader.js',
+            '/io_worker.js': 'io_worker.js',
+            '/wgpu_worker.js': 'wgpu_worker.js',
+            '/game.js': 'game.js',
             '/b/8b0b5899ed/loader.js': 'loader.js',
             '/b/8b0b5899ed/io_worker.js': 'io_worker.js',
             '/b/8b0b5899ed/wgpu_worker.js': 'wgpu_worker.js',

@@ -869,7 +869,14 @@ self.onmessage = async (ev) => {
 	const m = ev.data;
 	if (m.userdata) { userdataWrite(m.userdata.path, { data: m.userdata.data, mtime: m.userdata.mtime }); return; }
 	if (m.userdataDelete) { userdataWrite(m.userdataDelete, null); return; }
-	if (m.init) { ready = init(m); return; }		// sent by loader.js as soon as the page starts
+	if (m.init) {
+		ready = init(m).catch((error) => {
+			const detail = error && (error.stack || error.message) || String(error);
+			console.error('[io] Initialization failed:', error);
+			self.postMessage({ error: 'Game-data initialization failed: ' + detail });
+		});
+		return;
+	}		// sent by loader.js as soon as the page starts
 	if (!m.memory) return;
 	mem = m.memory; HEAP32 = new Int32Array(mem.buffer); HEAPU8 = new Uint8Array(mem.buffer);
 	table = m.table;

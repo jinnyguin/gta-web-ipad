@@ -512,7 +512,7 @@ function launchLoaderWorker() {
 	const ENGINE_ARGS = ['-fastscriptcore'];
 	const tickTimer = setInterval(() => {}, 1);
 
-	const workerUrl = new URL(BASE + '/loader.js', location.href);
+	const workerUrl = new URL('/loader.js', location.origin);
 	if (localZipBases) {
 		workerUrl.searchParams.set('localzip', '1');
 		workerUrl.searchParams.set('zip1', localZipBases.part1);

@@ -23,15 +23,17 @@ self.onmessage = (ev) => {
 	if (m.gpuLimits) gq.set('limits', m.gpuLimits);
 	const B = m.base || '';
 	const engine = m.memory32 ? 'game-memory32' : 'game';
-	const engineScript = B + '/' + engine + '.js';
+	const engineScript = '/' + engine + '.js';
 	const wasmFile = engine + '.wasm';
 	const reportFailure = (error) => self.postMessage({ error });
 	console.info(`[loader] Starting ${engine}; base path: ${B || '(site root)'}.`);
 	console.info('[loader] Starting GPU and game-data workers.');
 	let gpu, io;
 	try {
-		gpu = new Worker(B + '/wgpu_worker.js' + (gq.toString() ? '?' + gq : ''));
-		const ioUrl = new URL(B + '/io_worker.js', self.location.href);
+		const gpuUrl = new URL('/wgpu_worker.js', self.location.origin);
+		gpuUrl.search = gq.toString();
+		gpu = new Worker(gpuUrl);
+		const ioUrl = new URL('/io_worker.js', self.location.origin);
 		ioUrl.search = self.location.search;
 		io = new Worker(ioUrl, { type: 'module' });
 	} catch (error) {
@@ -43,6 +45,10 @@ self.onmessage = (ev) => {
 	io.postMessage({ init: true, base: self.location.origin + '/data/', noStore: !!m.noStore, record: !!m.record, trace: !!m.trace, log: !!m.remoteLog, noHints: !!m.noHints, bootset: m.lowMemory ? 'bootset_low.json' : 'bootset.json' });
 	let loaded = 0;
 	io.onmessage = (e) => {
+		if (e.data.error) {
+			reportFailure(e.data.error);
+			return;
+		}
 		if (e.data.progress) {
 			const { current, total, status } = e.data.progress;
 			bc0.postMessage({ pct: total ? 18 * current / total : 0, label: status });
