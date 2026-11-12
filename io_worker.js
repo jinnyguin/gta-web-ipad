@@ -20,7 +20,7 @@
 //   streamer's single reader thread); fetching it now, HINT_PAR at a time, turns ~3 reads/s (one round trip each) into as many as the link carries. See drainHints.
 'use strict';
 
-import { Unzip, unzipSync } from 'https://cdn.jsdelivr.net/npm/fflate@0.8.2/esm/browser.js';
+import { Unzip, unzipSync } from '/fflate-0.8.2.js';
 
 let mem, HEAP32, HEAPU8, table;
 let files = [], base = '', bc = null, pendingBytes = 0, lastPost = 0, noHints = false, dataQuery = '';		// noHints: ?nohints=1 (diagnostics), see drainHints; dataQuery: ?v=<manifest version> on every data URL

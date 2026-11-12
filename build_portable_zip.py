@@ -34,7 +34,8 @@ def main():
                 files.append(path)
     for name in ['README.md', 'Launch-Local.cmd', 'Start-Local.ps1', 'serve_local.py', 'verify_snapshot.py',
                  'mirror_site.py', 'bundle_runtime.py', 'build_portable_zip.py', 'homepage.html',
-                 'loader.js', 'game.js', 'io_worker.js', 'wgpu_worker.js', 'headers.txt',
+                 'loader.js', 'game.js', 'io_worker.js', 'fflate-0.8.2.js', 'FFLATE-LICENSE.txt',
+                 'wgpu_worker.js', 'headers.txt',
                  'data-manifest.json', 'shader-index.json', 'public_discovery.py']:
         files.append(ROOT / name)
     files.sort(key=lambda p: str(p.relative_to(ROOT)))

@@ -199,10 +199,12 @@ class LocalBuildHandler(Handler):
         build_files = {
             '/loader.js': 'loader.js',
             '/io_worker.js': 'io_worker.js',
+            '/fflate-0.8.2.js': 'fflate-0.8.2.js',
             '/wgpu_worker.js': 'wgpu_worker.js',
             '/game.js': 'game.js',
             '/b/8b0b5899ed/loader.js': 'loader.js',
             '/b/8b0b5899ed/io_worker.js': 'io_worker.js',
+            '/b/8b0b5899ed/fflate-0.8.2.js': 'fflate-0.8.2.js',
             '/b/8b0b5899ed/wgpu_worker.js': 'wgpu_worker.js',
             '/b/8b0b5899ed/game.js': 'game.js',
             '/data/manifest.json': 'data-manifest.json',

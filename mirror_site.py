@@ -122,6 +122,7 @@ def main():
             except ValueError:
                 pass
     for path, source in [('/index.html', 'homepage.html'), (BUILD + '/loader.js', 'loader.js'),
+                         (BUILD + '/fflate-0.8.2.js', 'fflate-0.8.2.js'),
                          (BUILD + '/game.js', 'game.js'), (BUILD + '/io_worker.js', 'io_worker.js'),
                          (BUILD + '/wgpu_worker.js', 'wgpu_worker.js'), ('/data/manifest.json', 'data-manifest.json'),
                          (BUILD + '/shaders/index.json', 'shader-index.json')]:

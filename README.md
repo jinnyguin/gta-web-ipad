@@ -87,6 +87,8 @@ The page automatically selects the 32-bit engine and low-memory profile on iPhon
 
 The ZIP includes `game-memory32.js` and `game-memory32.wasm` in `mirror/playgta5.com/b/8b0b5899ed/`. Merge the contents of your existing `mirror/playgta5.com/` into that folder tree to add the matching game data, shaders, and worker scripts. Keep both `game-memory32` files together in the build directory.
 
+The I/O worker also loads the bundled `fflate-0.8.2.js` ZIP module from the site root; keep that file deployed alongside `io_worker.js`. Its MIT license is in `FFLATE-LICENSE.txt`.
+
 The included engine was converted with Binaryen 132. It uses 32-bit WebAssembly memory and table addresses and preserves the engine's internal 64-bit data layout. The shared heap starts at 512 MiB and can grow to 2 GiB. In a local startup test it reached about 1.44 GiB before the game requested its asset manifest. The test covered engine initialization and a pthread. Gameplay on an iPhone still needs to be tested with the matching assets.
 
 For an HTTPS deployment, publish `homepage.html` as `/index.html` and `loader.js` as `/b/8b0b5899ed/loader.js`. Serve the engine and game data on that origin with the same isolation headers as `serve_local.py` and use `application/wasm` for the engine binary. Open the HTTPS URL in Safari on your iPhone. The game also needs WebGPU in a worker, OffscreenCanvas, and the matching mirror assets.
