@@ -2,6 +2,11 @@
 // and main() here; the loop blocks this worker, which is fine (nothing else runs on it). game.js also runs in every pthread worker.
 'use strict';
 let started = false;
+let diagnosticChannel;
+function diagnostic(text) {
+	console.info(text);
+	(diagnosticChannel || (diagnosticChannel = new BroadcastChannel('game-log'))).postMessage(text);
+}
 self.onmessage = (ev) => {
 	if (started) return;
 	started = true;
@@ -26,8 +31,9 @@ self.onmessage = (ev) => {
 	const engineScript = '/' + engine + '.js';
 	const wasmFile = engine + '.wasm';
 	const reportFailure = (error) => self.postMessage({ error });
-	console.info(`[loader] Starting ${engine}; base path: ${B || '(site root)'}.`);
-	console.info('[loader] Starting GPU and game-data workers.');
+	diagnostic(`[loader] Starting ${engine}; base path: ${B || '(site root)'}.`);
+	diagnostic(`[loader] Game-file cache: ${m.noStore ? 'disabled' : 'enabled'}; local ZIP: ${self.location.search.includes('localzip=1') ? 'enabled' : 'disabled'}.`);
+	diagnostic('[loader] Starting GPU and game-data workers.');
 	let gpu, io;
 	try {
 		const gpuUrl = new URL('/wgpu_worker.js', self.location.origin);
@@ -38,7 +44,7 @@ self.onmessage = (ev) => {
 		io = new Worker(ioUrl, { type: 'module' });
 	} catch (error) {
 		gpu?.terminate();
-		console.error('[loader] Could not create a game worker:', error);
+		diagnostic('[loader] ERROR Could not create a game worker: ' + (error && (error.stack || error.message) || error));
 		reportFailure('Could not create a game worker: ' + (error.message || error));
 		return;
 	}
@@ -46,6 +52,7 @@ self.onmessage = (ev) => {
 	let loaded = 0;
 	io.onmessage = (e) => {
 		if (e.data.error) {
+			diagnostic('[loader] ERROR I/O initialization failed: ' + e.data.error);
 			reportFailure(e.data.error);
 			return;
 		}
@@ -61,7 +68,7 @@ self.onmessage = (ev) => {
 	const workerError = (name, e) => {
 		const location = e.filename ? ` at ${e.filename}:${e.lineno || 0}:${e.colno || 0}` : '';
 		const detail = e.message || e.type || 'unknown worker error';
-		console.error(`[loader] ${name} worker error${location}: ${detail}`, e.error || e);
+		diagnostic(`[loader] ERROR ${name} worker error${location}: ${detail}${e.error?.stack ? '\n' + e.error.stack : ''}`);
 		reportFailure(`${name} worker failed: ${detail}${location}`);
 	};
 	io.onerror = (e) => workerError('I/O', e);
@@ -69,13 +76,14 @@ self.onmessage = (ev) => {
 	const fetchWasm = async () => {
 		for (let attempt = 0; ; attempt++) {
 			let res = null, err = null;
-			console.info(`[loader] Fetching ${wasmFile}${attempt ? ` (attempt ${attempt + 1})` : ''}.`);
+			diagnostic(`[loader] Fetching ${wasmFile}${attempt ? ` (attempt ${attempt + 1})` : ''}.`);
 			try { res = await fetch(B + '/' + wasmFile); } catch (e) { err = e; }
 			if (m.memory32 && res?.status === 404) throw new Error('The 32-bit engine file is missing.');
 			if (res && res.ok) {
-				console.info(`[loader] ${wasmFile} response: ${res.headers.get('Content-Length') || 'unknown'} bytes.`);
+				diagnostic(`[loader] ${wasmFile} response: HTTP ${res.status}; ${res.headers.get('Content-Type') || 'unknown content type'}; ${res.headers.get('Content-Length') || 'unknown'} bytes; ${res.url || wasmFile}.`);
 				return res;
 			}
+			diagnostic(`[loader] ${wasmFile} request failed: ${res ? `HTTP ${res.status} ${res.statusText}; ${res.url || wasmFile}` : err && (err.stack || err.message) || 'network error'}`);
 			if (attempt >= 7) { if (res) throw new Error('HTTP ' + res.status + ' for ' + wasmFile); throw err; }
 			bc0.postMessage({ label: 'The server is busy, retrying (' + (attempt + 1) + ')' });
 			await new Promise((r) => setTimeout(r, Math.min(5000, 300 * 2 ** attempt) * (0.5 + Math.random())));

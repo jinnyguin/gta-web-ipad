@@ -43,14 +43,21 @@
 	#local-zip-settings label { display: grid; gap: 3px; }
 	#local-zip-settings input { box-sizing: border-box; width: 100%; padding: 5px; }
 	#local-zip-settings button { padding: 5px 8px; }
+	#cache-setting { display: flex !important; align-items: center; gap: 6px !important; }
+	#cache-setting input { appearance: none; flex: none; width: 34px; height: 18px; margin: 0; border: 1px solid #777; border-radius: 10px; background: #555; cursor: pointer; transition: background .15s; }
+	#cache-setting input::after { content: ''; display: block; width: 14px; height: 14px; margin: 1px; border-radius: 50%; background: #ddd; transition: transform .15s; }
+	#cache-setting input:checked { background: #368b55; }
+	#cache-setting input:checked::after { transform: translateX(16px); }
+	#cache-setting input:focus-visible { outline: 2px solid #9bd; outline-offset: 2px; }
 </style>
 </head>
 <body>
 
 <canvas id="canvas" width="800" height="600" tabindex="-1"></canvas>
 <div id="hud"></div>
-<details id="local-zip-settings"><summary>Use your local ZIP files</summary>
+<details id="local-zip-settings"><summary>Startup and local ZIP settings</summary>
 	<form id="local-zip-form">
+		<label id="cache-setting"><input id="cache-game-files" type="checkbox"> Cache downloaded game files on this device</label>
 		<label>Part 1 base URL
 			<input id="local-zip-part1" type="url" placeholder="http://localhost:500/" required>
 		</label>
@@ -70,6 +77,10 @@ const q = new URLSearchParams(location.search);
 const localZipMode = q.get('localzip') !== '0' && q.get('localzips') !== '0';
 const LOCAL_ZIP_PART1_KEY = 'gta-local-zip-part1-base';
 const LOCAL_ZIP_REST_KEY = 'gta-local-zip-rest-base';
+const CACHE_MODE_KEY = 'gta-cache-game-files';
+const cacheEnabled = q.has('cache')
+	? q.get('cache') !== '0'
+	: !(q.get('nocache') || q.get('nosw')) && localStorage.getItem(CACHE_MODE_KEY) !== '0';
 
 function normalizeZipBase(value) {
     const url = new URL(value);
@@ -91,6 +102,15 @@ function getLocalZipBases() {
 	const restInput = document.getElementById('local-zip-rest');
 	part1Input.value = localStorage.getItem(LOCAL_ZIP_PART1_KEY) || '';
 	restInput.value = localStorage.getItem(LOCAL_ZIP_REST_KEY) || '';
+	const cacheInput = document.getElementById('cache-game-files');
+	cacheInput.checked = cacheEnabled;
+	cacheInput.addEventListener('change', () => {
+		localStorage.setItem(CACHE_MODE_KEY, cacheInput.checked ? '1' : '0');
+		q.set('cache', cacheInput.checked ? '1' : '0');
+		q.delete('nocache');
+		q.delete('nosw');
+		location.search = q.toString();
+	});
 	if (localZipMode) document.getElementById('local-zip-settings').open = true;
 	document.getElementById('local-zip-form').addEventListener('submit', (event) => {
 		event.preventDefault();
@@ -426,6 +446,10 @@ const hud = document.getElementById('hud');
 }
 const canvas = document.getElementById('canvas');
 
+const workerDiagnostics = new BroadcastChannel('game-log');
+workerDiagnostics.onmessage = (ev) => {
+	if (typeof ev.data === 'string') console.info('[worker]', ev.data);
+};
 if (remoteLog) {
 	const queue = [];
 	let sending = false;
@@ -487,6 +511,8 @@ function launchLoaderWorker() {
 
 	const appleMobile = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 	const memory32 = q.get('memory') === '32' || appleMobile || !supportsMemory64();
+	console.info(`[page] Game-file cache: ${cacheEnabled ? 'enabled (OPFS cached blocks; network misses are stored)' : 'disabled (direct network reads)'}.`);
+	console.info(`[page] Startup options: local ZIP ${localZipMode ? 'enabled' : 'disabled'}, low-memory preference ${q.get('low') || 'automatic'}, query ${location.search || '(none)'}.`);
 	const offscreen = canvas.transferControlToOffscreen();
 	dropOldCache();
 
@@ -554,7 +580,7 @@ function launchLoaderWorker() {
 		gpuLimits: q.get('limits') || '',
 		keepThreads: (q.get('keep') || '').split(',').reduce((m, g) => m | ({ replay: 1, net: 2, bink: 4, idle: 8 }[g] || 0), 0),
 		cores,
-		noStore: !!(q.get('nocache') || q.get('nosw')),
+		noStore: !cacheEnabled,
 		fullConsole: !!q.get('console'),
 		remoteLog,
 		trace: !!q.get('trace'),

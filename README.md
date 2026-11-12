@@ -49,14 +49,21 @@ And don't email me for asking the mirror folder. I will not reply to the email.
 
 ## Local split-ZIP source
 
-On Cloudflare Pages, local ZIP mode is enabled by default. In the **Use your
-local ZIP files** panel, enter the localhost directory URLs for part 1 and
-parts 2–14. The game will not start until both URLs are saved. **Clear saved
+On Cloudflare Pages, local ZIP mode is enabled by default. In the
+**Startup and local ZIP settings** panel, enter the localhost directory URLs
+for part 1 and parts 2–14. The game will not start until both URLs are saved.
+**Clear saved
 paths** removes them and disables local ZIP mode. Add `?localzip=0` to use the
 site's standard ZIP source instead. Each directory
 must serve `playgta5-part-01-of-14.zip` or `playgta5-part-02-of-14.zip` through
 `playgta5-part-14-of-14.zip`, respectively. The paths are saved in that
 browser's local storage.
+
+The settings panel also has a **Cache downloaded game files** switch. It is
+enabled by default: game-file blocks are reused from the browser's OPFS cache,
+and missing blocks are downloaded and saved. Turn it off to force direct
+network reads for troubleshooting. The current mode and cache hits/misses are
+reported in the browser console.
 
 Run local file servers for those directories, for example:
 

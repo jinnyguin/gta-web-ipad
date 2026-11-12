@@ -24,6 +24,7 @@ import { Unzip, unzipSync } from 'https://cdn.jsdelivr.net/npm/fflate@0.8.2/esm/
 
 let mem, HEAP32, HEAPU8, table;
 let files = [], base = '', bc = null, pendingBytes = 0, lastPost = 0, noHints = false, dataQuery = '';		// noHints: ?nohints=1 (diagnostics), see drainHints; dataQuery: ?v=<manifest version> on every data URL
+let cacheEnabled = false;
 // Store block size 4 KB. The engine mounts ~1,200 archives at boot and reads only each one's table of contents (16 bytes, the entries, the names: median 3 KB, 4.9 MB for all
 // of them, measured with ?trace=1); fetching 256 KB (first version) or 16 KB blocks plus a growing read-ahead (second) made the boot download 25x larger for those files.
 // Read-ahead now only follows *large* sequential reads (streamed resources), see serve().
@@ -31,19 +32,52 @@ const BS = 4096, MAX_RUN = 256, MAX_AHEAD = 512 * 1024, FIRST_AHEAD = 64 * 1024,
 const MBS = 262144;		// block size of the memory-only fallback (no store)
 let remoteLog = false;		// ?log=1 on the page (loader.js passes it in the init message): this worker's diagnostics go to the dev server
 function log(text) { if (remoteLog) fetch('/log', { method: 'POST', body: text }).catch(() => {}); }
+let diagnosticChannel;
+function diagnostic(text) {
+	console.info(text);
+	(diagnosticChannel || (diagnosticChannel = new BroadcastChannel('game-log'))).postMessage(text);
+}
 
 const pathIndex = new Map();
 const fileBytes = new Map();		// diagnostics: network bytes per file path, top of the list goes to the server log every 25 MB
 const consoleLoggedFiles = new Set();
 const CONSOLE_FILE_LOG_LIMIT = 200;
+const cacheLogKeys = new Set();
+const CACHE_LOG_LIMIT = 300;
+let cacheLogSuppressed = false, rangeLogCount = 0;
 let statTotal = 0, statNext = 25 * 1048576, statT0 = performance.now();
 function logFileStart(f, start, end) {
 	if (consoleLoggedFiles.has(f.path) || consoleLoggedFiles.size > CONSOLE_FILE_LOG_LIMIT) return;
 	consoleLoggedFiles.add(f.path);
 	if (consoleLoggedFiles.size <= CONSOLE_FILE_LOG_LIMIT) {
-		console.info('[io] Loading game file:', f.path, `(${start}-${end}, ${f.size} bytes)`);
+		diagnostic(`[io] Loading game file: ${f.path} (bytes ${start}-${end}; file size ${f.size} bytes).`);
 	} else {
-		console.info('[io] Suppressing further per-file start messages; loading continues.');
+		diagnostic('[io] Suppressing further per-file start messages; loading continues.');
+	}
+}
+function logDirectRead(f, start, end) {
+	const key = f.path + ':direct';
+	if (cacheLogKeys.has(key)) return;
+	if (cacheLogKeys.size >= CACHE_LOG_LIMIT) return;
+	cacheLogKeys.add(key);
+	diagnostic(`[io] Reading game file directly: ${f.path} (bytes ${start}-${end}); persistent cache ${cacheEnabled ? 'unavailable' : 'disabled'}.`);
+}
+function logCacheUse(f, start, end, cachedBlocks, missingBlocks) {
+	const states = [];
+	if (cachedBlocks) states.push(['cached', cachedBlocks]);
+	if (missingBlocks) states.push(['network', missingBlocks]);
+	for (const [source, blocks] of states) {
+		const key = f.path + ':' + source;
+		if (cacheLogKeys.has(key)) continue;
+		if (cacheLogKeys.size >= CACHE_LOG_LIMIT) {
+			if (!cacheLogSuppressed) {
+				cacheLogSuppressed = true;
+				diagnostic('[io] Suppressing further per-file cache-source messages; cache counters continue.');
+			}
+			return;
+		}
+		cacheLogKeys.add(key);
+		diagnostic(`[io] ${source === 'cached' ? 'Using cached' : 'Fetching uncached'} game file blocks: ${f.path} (requested bytes ${start}-${end}; ${blocks} ${blocks === 1 ? 'block' : 'blocks'} ${source === 'cached' ? 'already in OPFS' : 'not in OPFS'}).`);
 	}
 }
 function tally(f, n) {
@@ -149,6 +183,7 @@ async function openStore(version) {
 			ok = head.getUint32(0, true) === 0x4a415449 && head.getFloat64(8, true) === version;
 		}
 		if (!ok) {
+			diagnostic(`[io] Persistent cache version/header mismatch; resetting block store for manifest version ${version}.`);
 			s.truncate(0); j.truncate(0);
 			head.setUint32(0, 0x4a415449, true); head.setFloat64(8, version, true);
 			j.write(new Uint8Array(head.buffer), { at: 0 });
@@ -168,9 +203,10 @@ async function openStore(version) {
 		}
 		journalEnd = 16 + n * 16;
 		sh = s; jh = j;
-		log('[io] persistent store: ' + good + ' blocks (' + (good * BS / 1048576 | 0) + ' MB), store.bin ' + (storeEnd / 1048576 | 0) + ' MB');
+		diagnostic(`[io] Persistent OPFS block cache ready: ${good} cached blocks (${(good * BS / 1048576).toFixed(1)} MB indexed), store.bin ${(storeEnd / 1048576).toFixed(1)} MB, manifest version ${version}.`);
 	} catch (e) {
 		sh = jh = null;
+		diagnostic(`[io] ERROR Could not open persistent OPFS block cache; reads will fall back to network/memory: ${e && (e.stack || e.message) || e}`);
 		log('[io] no persistent store (' + e.message + '): blocks are cached in memory only');
 	}
 }
@@ -190,14 +226,16 @@ const localZipRestBase = ioWorkerUrl.searchParams.get('ziprest') || '';
 async function verifyOPFSCache(rootDir) {
   try {
     await rootDir.getFileHandle(CACHE_MARKER);
+    diagnostic(`[io] ZIP extraction cache marker found: ${CACHE_MARKER}.`);
     return true;
   } catch (err) {
+    diagnostic(`[io] ZIP extraction cache marker missing: ${CACHE_MARKER} (${err.name || 'error'}).`);
     return false;
   }
 }
 
 async function downloadAndExtractPipeline(rootDir) {
-  console.info(`[io] ZIP cache is missing; downloading and extracting ${TOTAL_PARTS} parts.`);
+  diagnostic(`[io] ZIP cache is missing; downloading and extracting ${TOTAL_PARTS} parts.`);
   for (let i = 1; i <= TOTAL_PARTS; i++) {
     const releaseUrl = i === 1
       ? PROXY_PART_01_URL
@@ -207,7 +245,7 @@ async function downloadAndExtractPipeline(rootDir) {
 
     const partName = `playgta5-part-${String(i).padStart(2, '0')}-of-${TOTAL_PARTS}.zip`;
     const partStarted = performance.now();
-    console.info(`[io] Downloading ZIP part ${i}/${TOTAL_PARTS}: ${fileUrl}`);
+    diagnostic(`[io] Downloading ZIP part ${i}/${TOTAL_PARTS}: ${fileUrl}`);
 
     self.postMessage({
       progress: {
@@ -220,23 +258,23 @@ async function downloadAndExtractPipeline(rootDir) {
     try {
       const response = await fetch(fileUrl);
       if (!response.ok) throw new Error(`HTTP ${response.status} downloading part ${i}`);
-      console.info(`[io] ZIP part ${i}/${TOTAL_PARTS} response received (${response.headers.get('Content-Length') || 'unknown'} bytes); starting extraction.`);
+      diagnostic(`[io] ZIP part ${i}/${TOTAL_PARTS} response: HTTP ${response.status}, ${response.headers.get('Content-Type') || 'unknown content type'}, ${response.headers.get('Content-Length') || 'unknown'} bytes from ${response.url || fileUrl}; starting extraction.`);
 
       if (i === 1) {
         const part1Buffer = new Uint8Array(await response.arrayBuffer());
-        console.info(`[io] Extracting ${partName} (${part1Buffer.length} bytes, buffered).`);
+        diagnostic(`[io] Extracting ${partName} (${part1Buffer.length} bytes, buffered).`);
         await extractPartOneHeaders(part1Buffer, rootDir, i);
       } else {
-        console.info(`[io] Extracting ${partName} (streaming).`);
+        diagnostic(`[io] Extracting ${partName} (streaming).`);
         await decompressZipStream(response.body, rootDir, i);
       }
     } catch (error) {
-      console.error(`[io] ZIP part ${i}/${TOTAL_PARTS} failed:`, error);
+      diagnostic(`[io] ERROR ZIP part ${i}/${TOTAL_PARTS} failed: ${error && (error.stack || error.message) || error}`);
       throw error;
     }
-    console.info(`[io] Finished ${partName} in ${((performance.now() - partStarted) / 1000).toFixed(1)} s.`);
+    diagnostic(`[io] Finished ${partName} in ${((performance.now() - partStarted) / 1000).toFixed(1)} s.`);
   }
-  console.info('[io] All ZIP parts have been extracted.');
+  diagnostic('[io] All ZIP parts have been extracted.');
 }
 
 async function extractPartOneHeaders(uint8Buffer, rootDir, part) {
@@ -248,12 +286,12 @@ async function extractPartOneHeaders(uint8Buffer, rootDir, part) {
     if (!filePath.endsWith('/') && fileData.length > 0) {
       const cleanPath = filePath.replace(/^\.?\//, '');
       fileCount++; totalBytes += fileData.length;
-      if (fileCount === 1 || fileCount % 100 === 0) console.info(`[io] ZIP part ${part}/${TOTAL_PARTS}: extracting file ${fileCount}: ${cleanPath}`);
+      if (fileCount === 1 || fileCount % 100 === 0) diagnostic(`[io] ZIP part ${part}/${TOTAL_PARTS}: extracting file ${fileCount}: ${cleanPath}`);
       savePromises.push(saveFileToOPFS(rootDir, cleanPath, fileData));
     }
   }
   await Promise.all(savePromises);
-  console.info(`[io] ZIP part ${part}/${TOTAL_PARTS}: extracted ${fileCount} files (${(totalBytes / 1048576).toFixed(1)} MB).`);
+  diagnostic(`[io] ZIP part ${part}/${TOTAL_PARTS}: extracted ${fileCount} files (${(totalBytes / 1048576).toFixed(1)} MB).`);
 }
 
 function decompressZipStream(stream, rootDir, part) {
@@ -262,12 +300,12 @@ function decompressZipStream(stream, rootDir, part) {
     const fail = (error) => {
       if (failed) return;
       failed = true;
-      console.error(`[io] ZIP part ${part}/${TOTAL_PARTS} extraction failed:`, error);
+      diagnostic(`[io] ERROR ZIP part ${part}/${TOTAL_PARTS} extraction failed: ${error && (error.stack || error.message) || error}`);
       reject(error);
     };
     const finish = () => {
       if (inputDone && pendingWrites === 0 && !failed) {
-        console.info(`[io] ZIP part ${part}/${TOTAL_PARTS}: extracted ${fileCount} files (${(totalBytes / 1048576).toFixed(1)} MB).`);
+        diagnostic(`[io] ZIP part ${part}/${TOTAL_PARTS}: extracted ${fileCount} files (${(totalBytes / 1048576).toFixed(1)} MB).`);
         resolve();
       }
     };
@@ -284,7 +322,7 @@ function decompressZipStream(stream, rootDir, part) {
         if (final) {
           const completeBuffer = concatTypedArrays(fileData);
           fileCount++; totalBytes += completeBuffer.length;
-          if (fileCount === 1 || fileCount % 100 === 0) console.info(`[io] ZIP part ${part}/${TOTAL_PARTS}: extracted file ${fileCount}: ${relativePath}`);
+          if (fileCount === 1 || fileCount % 100 === 0) diagnostic(`[io] ZIP part ${part}/${TOTAL_PARTS}: extracted file ${fileCount}: ${relativePath}`);
           pendingWrites++;
           saveFileToOPFS(rootDir, relativePath, completeBuffer).then(() => {
             pendingWrites--;
@@ -374,8 +412,13 @@ async function fetchRetry(url, init) {
 		let res = null, err = null;
 		try { res = await fetch(url, init); } catch (e) { err = e; }
 		if (res && res.status < 500 && res.status !== 429) return res;
-		if (attempt >= 7) { if (res) return res; throw err; }
+		if (attempt >= 7) {
+			diagnostic(`[io] ERROR Request exhausted retries: ${url}; ${res ? `HTTP ${res.status}` : err && (err.stack || err.message) || err}`);
+			if (res) return res;
+			throw err;
+		}
 		netStat.retries = (netStat.retries || 0) + 1;
+		diagnostic(`[io] Retrying request ${attempt + 1}/7: ${url}; ${res ? `HTTP ${res.status}` : String(err)}`);
 		await new Promise((r) => setTimeout(r, Math.min(5000, 300 * 2 ** attempt) * (0.5 + Math.random())));
 	}
 }
@@ -516,6 +559,9 @@ async function fetchRange(f, start, end, onChunk, whole, low) {
 async function fetchRangeRaw(f, start, end, onChunk, whole, low) {
 	const url = base + f.path.split('/').map(encodeURIComponent).join('/') + dataQuery;		// ?v=<manifest version>: the same URL always has the same bytes, so the host (and Cloudflare, with a rule for /data/) may cache it for ever
 	logFileStart(f, start, end);
+	const requestStarted = performance.now();
+	const logRequest = rangeLogCount++ < 120;
+	if (logRequest) diagnostic(`[io] Fetching ${f.path}: ${whole ? 'whole file' : `Range bytes=${start}-${end}`} from ${url} (priority ${low ? 'low' : 'high'}, HTTP cache bypassed).`);
 	// no-store: the host's own static serving of a range (Apache, host/data/.htaccess) sends no Cache-Control, and Chrome would keep every 206 in its HTTP cache next to this store
 	const init = { cache: 'no-store', priority: low ? 'low' : 'high' };
 	if (!whole) init.headers = { Range: 'bytes=' + start + '-' + end };		// whole: the server sends a compressed copy, the browser decodes it
@@ -523,13 +569,15 @@ async function fetchRangeRaw(f, start, end, onChunk, whole, low) {
 	try {
 		res = await fetchRetry(url, init);
 	} catch (error) {
-		console.error('[io] Network request failed for game file:', f.path, error);
+		diagnostic(`[io] ERROR Network request failed for game file ${f.path}: ${error && (error.stack || error.message) || error}`);
 		throw error;
 	}
 	if (res.status !== 206 && res.status !== 200) {
-		console.error(`[io] Game file request returned HTTP ${res.status}:`, f.path);
-		throw new Error('HTTP ' + res.status + ' for ' + f.path);
+		const detail = `HTTP ${res.status} ${res.statusText}; ${res.headers.get('Content-Type') || 'unknown content type'}; ${url}`;
+		diagnostic(`[io] ERROR Game file request failed: ${detail}`);
+		throw new Error(detail);
 	}
+	if (logRequest) diagnostic(`[io] Response for ${f.path}: HTTP ${res.status}, ${res.headers.get('Content-Type') || 'unknown content type'}, ${res.headers.get('Content-Length') || 'unknown'} bytes, Content-Range ${res.headers.get('Content-Range') || '(none)'}.`);
 	let skip = res.status === 200 ? start : 0;		// a server that ignores Range sends the whole file
 	const total = end - start + 1;
 	const reader = res.body.getReader();
@@ -547,6 +595,7 @@ async function fetchRangeRaw(f, start, end, onChunk, whole, low) {
 		if (chunk.length) { onChunk(chunk, pos); pos += chunk.length; }
 		if (pos >= total) { reader.cancel().catch(() => {}); break; }
 	}
+	if (logRequest) diagnostic(`[io] Finished ${f.path}: received ${pos}/${total} requested bytes in ${((performance.now() - requestStarted) / 1000).toFixed(2)} s.`);
 	return pos;
 }
 
@@ -692,7 +741,18 @@ async function serve(slot) {
 		if (off >= f.size) result = 0;
 		else {
 			if (off + len > f.size) len = f.size - off;
-			if (navigator.onLine) {
+			const first = Math.floor(off / BS), needLast = Math.floor((off + len - 1) / BS);
+			if (sh) {
+				let cachedBlocks = 0, missingBlocks = 0;
+				for (let b = first; b <= needLast; b++) {
+					if (index.has(id * 1048576 + b)) cachedBlocks++;
+					else missingBlocks++;
+				}
+				logCacheUse(f, off, off + len - 1, cachedBlocks, missingBlocks);
+			} else {
+				logDirectRead(f, off, off + len - 1);
+			}
+			if (navigator.onLine && (!sh || !cacheEnabled)) {
 				result = await readFromNetwork(id, off, len, dst);
 			} else if (sh) {
 				// read-ahead: a read that continues the previous one of this file (a sequential scan) also fetches the next bytes, doubling up to MAX_AHEAD; anything else fetches only what it needs
@@ -708,7 +768,7 @@ async function serve(slot) {
 				if (recording) recordTouch(id, off, off + len - 1);
 				// Only the requested blocks are waited for: the read-ahead is started but the engine's read completes as soon as its own bytes are in (it waited for the read-ahead
 				// download too). A request whose blocks are all stored is served synchronously, without the async block bookkeeping.
-				const first = Math.floor(off / BS), needLast = Math.floor((off + len - 1) / BS), aheadLast = Math.floor(lastByte / BS);
+				const aheadLast = Math.floor(lastByte / BS);
 				let need = null, cold = false; const waitStart = performance.now();
 				for (let b = first; b <= needLast; b++) if (!index.has(id * 1048576 + b)) { cold = cold || !inflight.has(id * 1048576 + b); need = need || true; }
 				if (need) need = ensureBlocks(id, first, needLast);
@@ -725,8 +785,8 @@ async function serve(slot) {
 			} else result = await readWithoutStore(id, off, len, dst);
 		}
 	} catch (e) {
-		console.error('[io] Engine file read failed:', e);
-		log('[io] read failed: ' + e.message);
+		diagnostic('[io] ERROR Engine file read failed: ' + (e && (e.stack || e.message) || e));
+		log('[io] read failed: ' + (e && (e.stack || e.message) || e));
 	}
 	views();
 	Atomics.store(HEAP32, w + 7, result);
@@ -796,37 +856,43 @@ async function loop() {
 let ready = null;
 async function init(m) {
 	base = m.base; bc = new BroadcastChannel('game-progress'); remoteLog = !!m.log; noHints = !!m.noHints;
-	console.info('[io] Checking extracted game-data cache in OPFS.');
+	cacheEnabled = !m.noStore;
+	diagnostic(`[io] Initialization: manifest base ${base}; game-file cache ${cacheEnabled ? 'enabled' : 'disabled'}; online ${navigator.onLine}; OPFS support ${!!navigator.storage?.getDirectory}; local ZIP ${useLocalZipProxy ? 'enabled' : 'disabled'}.`);
+	diagnostic('[io] Checking extracted game-data cache in OPFS.');
 	const rootDir = await navigator.storage.getDirectory();
 	const isCached = await verifyOPFSCache(rootDir);
 	if (!isCached) {
-		console.info('[io] Extracted game-data cache not found.');
+		diagnostic('[io] Extracted game-data cache not found; ZIP downloads and extraction are required.');
 		log('[io_worker] Pre-cache missing. Starting automated 14-part stream...');
 		await downloadAndExtractPipeline(rootDir);
 		await saveFileToOPFS(rootDir, CACHE_MARKER, new Uint8Array());
-		console.info('[io] Wrote ZIP extraction cache marker.');
+		diagnostic('[io] Wrote ZIP extraction cache marker.');
 	} else {
-		console.info('[io] Extracted game-data cache found; skipping ZIP downloads.');
+		diagnostic('[io] Extracted game-data cache found; skipping ZIP downloads.');
 	}
 	bc.postMessage({ assetsReady: true });
 
-	console.info('[io] Loading game-data manifest:', base + 'manifest.json');
+	diagnostic('[io] Loading game-data manifest: ' + base + 'manifest.json');
 	let j;
 	try {
+		const manifestStarted = performance.now();
 		const response = await fetchRetry(base + 'manifest.json', { cache: 'no-store' });
-		if (!response.ok) throw new Error('HTTP ' + response.status);
+		diagnostic(`[io] Manifest response: HTTP ${response.status} ${response.statusText}; ${response.headers.get('Content-Type') || 'unknown content type'}; ${response.headers.get('Content-Length') || 'unknown'} bytes; final URL ${response.url || base + 'manifest.json'}.`);
+		if (!response.ok) throw new Error(`HTTP ${response.status} ${response.statusText} for ${response.url || base + 'manifest.json'}`);
 		j = await response.json();
+		diagnostic(`[io] Manifest JSON parsed in ${((performance.now() - manifestStarted) / 1000).toFixed(2)} s.`);
 	} catch (error) {
-		console.error('[io] Failed to load game-data manifest:', error);
+		diagnostic('[io] ERROR Failed to load game-data manifest: ' + (error && (error.stack || error.message) || error));
 		throw error;
 	}
 	files = j.files.map((f) => ({ path: f[0], size: f[1] }));
 	dataQuery = j.version ? '?v=' + encodeURIComponent(j.version) : ''; dataVersion = j.version ? String(j.version) : '';
 	files.forEach((f, i) => pathIndex.set(f.path, i));
-	console.info(`[io] Loaded manifest version ${j.version || '(unspecified)'} with ${files.length} files.`);
+	diagnostic(`[io] Loaded manifest version ${j.version || '(unspecified)'} with ${files.length} files; first path ${files[0]?.path || '(none)'}; total declared size ${(files.reduce((sum, f) => sum + f.size, 0) / 1048576).toFixed(1)} MB.`);
 	recording = !!m.record; traceOn = !!m.trace;
 	if (remoteLog) startNetStats();
 	if (!m.noStore) await openStore(Number(String(j.version).replace(/\D/g, '')) || 0);
+	else diagnostic('[io] Persistent game-file block cache disabled; file reads will use the network.');
 	if (sh && !navigator.onLine && m.bootset && !m.record) prefetch(m.bootset);
 	else console.info('[io] Boot-set prefetch skipped:', !sh ? 'persistent store unavailable' : navigator.onLine ? 'network available' : 'recording mode enabled');
 }
@@ -872,7 +938,7 @@ self.onmessage = async (ev) => {
 	if (m.init) {
 		ready = init(m).catch((error) => {
 			const detail = error && (error.stack || error.message) || String(error);
-			console.error('[io] Initialization failed:', error);
+			diagnostic('[io] ERROR Initialization failed: ' + detail);
 			self.postMessage({ error: 'Game-data initialization failed: ' + detail });
 		});
 		return;
