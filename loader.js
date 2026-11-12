@@ -6,7 +6,13 @@ self.onmessage = (ev) => {
 	if (started) return;
 	started = true;
 	const m = ev.data;
-	if (m.cores) Object.defineProperty(navigator, 'hardwareConcurrency', { value: m.cores });
+	if (m.cores && navigator.hardwareConcurrency !== m.cores) {
+		try {
+			Object.defineProperty(navigator, 'hardwareConcurrency', { value: m.cores });
+		} catch (error) {
+			console.warn('[loader] Could not override hardwareConcurrency; continuing with the browser value.', error);
+		}
+	}
 	const gq = new URLSearchParams();
 	if (m.slots) gq.set('slots', m.slots);
 	if (m.syncPipelines) gq.set('syncpipelines', '1');
@@ -22,10 +28,18 @@ self.onmessage = (ev) => {
 	const reportFailure = (error) => self.postMessage({ error });
 	console.info(`[loader] Starting ${engine}; base path: ${B || '(site root)'}.`);
 	console.info('[loader] Starting GPU and game-data workers.');
-	const gpu = new Worker(B + '/wgpu_worker.js' + (gq.toString() ? '?' + gq : ''));
-	const ioUrl = new URL(B + '/io_worker.js', self.location.href);
-	ioUrl.search = self.location.search;
-	const io = new Worker(ioUrl, { type: 'module' });
+	let gpu, io;
+	try {
+		gpu = new Worker(B + '/wgpu_worker.js' + (gq.toString() ? '?' + gq : ''));
+		const ioUrl = new URL(B + '/io_worker.js', self.location.href);
+		ioUrl.search = self.location.search;
+		io = new Worker(ioUrl, { type: 'module' });
+	} catch (error) {
+		gpu?.terminate();
+		console.error('[loader] Could not create a game worker:', error);
+		reportFailure('Could not create a game worker: ' + (error.message || error));
+		return;
+	}
 	io.postMessage({ init: true, base: self.location.origin + '/data/', noStore: !!m.noStore, record: !!m.record, trace: !!m.trace, log: !!m.remoteLog, noHints: !!m.noHints, bootset: m.lowMemory ? 'bootset_low.json' : 'bootset.json' });
 	let loaded = 0;
 	io.onmessage = (e) => {
@@ -38,8 +52,14 @@ self.onmessage = (ev) => {
 	gpu.onmessage = (e) => {
 		if (e.data.loaded && ++loaded === 2) start();
 	};
-	io.onerror = (e) => reportFailure('I/O worker failed' + (e.message ? ': ' + e.message : '.'));
-	gpu.onerror = (e) => reportFailure('GPU worker failed' + (e.message ? ': ' + e.message : '.'));
+	const workerError = (name, e) => {
+		const location = e.filename ? ` at ${e.filename}:${e.lineno || 0}:${e.colno || 0}` : '';
+		const detail = e.message || e.type || 'unknown worker error';
+		console.error(`[loader] ${name} worker error${location}: ${detail}`, e.error || e);
+		reportFailure(`${name} worker failed: ${detail}${location}`);
+	};
+	io.onerror = (e) => workerError('I/O', e);
+	gpu.onerror = (e) => workerError('GPU', e);
 	const fetchWasm = async () => {
 		for (let attempt = 0; ; attempt++) {
 			let res = null, err = null;

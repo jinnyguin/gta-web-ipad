@@ -518,9 +518,11 @@ function launchLoaderWorker() {
 		workerUrl.searchParams.set('zip1', localZipBases.part1);
 		workerUrl.searchParams.set('ziprest', localZipBases.rest);
 	}
+	console.info('[page] Starting loader worker:', workerUrl.pathname);
 	const worker = new Worker(workerUrl);
 	worker.onmessage = (ev) => {
 		if (ev.data.error) {
+			console.error('[page] Loader startup failed:', ev.data.error);
 			failStartup(ev.data.error);
 			clearInterval(tickTimer);
 			worker.terminate();
@@ -531,7 +533,10 @@ function launchLoaderWorker() {
 		if (ev.data.audio) { audioPending = ev.data.audio; tryStartAudio(); }
 	};
 	worker.onerror = (e) => {
-		failStartup('Loader worker failed' + (e.message ? ': ' + e.message : '.'));
+		const location = e.filename ? ` at ${e.filename}:${e.lineno || 0}:${e.colno || 0}` : ` (${workerUrl.pathname})`;
+		const detail = e.message || e.type || 'unknown worker error';
+		console.error('[page] Loader worker error' + location + ': ' + detail, e.error || e);
+		failStartup('Loader worker failed: ' + detail + location);
 		clearInterval(tickTimer);
 		worker.terminate();
 	};
