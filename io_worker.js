@@ -216,7 +216,7 @@ const TOTAL_PARTS = 14;
 const CACHE_MARKER = 'playgta5-assets-v1.complete';
 const PROXY_PART_01_URL = '/release-proxy/v1/playgta5-part-01-of-14.zip';
 const PROXY_PARTS_BASE_URL = '/release-proxy/v2/playgta5-part-';
-const LOCAL_ZIP_PROXY = 'http://127.0.0.1:8000';
+const LOCAL_ZIP_PROXY = 'https://gta-web-ipad.pages.dev';
 const ioWorkerUrl = new URL(self.location.href);
 const useLocalZipProxy = ioWorkerUrl.searchParams.get('localzip') === '1'
   || ioWorkerUrl.searchParams.get('localzips') === '1';
