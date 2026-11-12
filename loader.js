@@ -20,6 +20,8 @@ self.onmessage = (ev) => {
 	const engineScript = B + '/' + engine + '.js';
 	const wasmFile = engine + '.wasm';
 	const reportFailure = (error) => self.postMessage({ error });
+	console.info(`[loader] Starting ${engine}; base path: ${B || '(site root)'}.`);
+	console.info('[loader] Starting GPU and game-data workers.');
 	const gpu = new Worker(B + '/wgpu_worker.js' + (gq.toString() ? '?' + gq : ''));
 	const ioUrl = new URL(B + '/io_worker.js', self.location.href);
 	ioUrl.search = self.location.search;
@@ -41,9 +43,13 @@ self.onmessage = (ev) => {
 	const fetchWasm = async () => {
 		for (let attempt = 0; ; attempt++) {
 			let res = null, err = null;
+			console.info(`[loader] Fetching ${wasmFile}${attempt ? ` (attempt ${attempt + 1})` : ''}.`);
 			try { res = await fetch(B + '/' + wasmFile); } catch (e) { err = e; }
 			if (m.memory32 && res?.status === 404) throw new Error('The 32-bit engine file is missing.');
-			if (res && res.ok) return res;
+			if (res && res.ok) {
+				console.info(`[loader] ${wasmFile} response: ${res.headers.get('Content-Length') || 'unknown'} bytes.`);
+				return res;
+			}
 			if (attempt >= 7) { if (res) throw new Error('HTTP ' + res.status + ' for ' + wasmFile); throw err; }
 			bc0.postMessage({ label: 'The server is busy, retrying (' + (attempt + 1) + ')' });
 			await new Promise((r) => setTimeout(r, Math.min(5000, 300 * 2 ** attempt) * (0.5 + Math.random())));
@@ -146,6 +152,7 @@ self.onmessage = (ev) => {
 		};
 		console.log('loader: starting engine: ' + m.args.join(' ') + ' (cores ' + m.cores + ')');
 		try {
+			console.info('[loader] Loading engine script:', engineScript);
 			importScripts(engineScript);
 		} catch (e) {
 			console.error(e);

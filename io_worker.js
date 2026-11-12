@@ -34,7 +34,18 @@ function log(text) { if (remoteLog) fetch('/log', { method: 'POST', body: text }
 
 const pathIndex = new Map();
 const fileBytes = new Map();		// diagnostics: network bytes per file path, top of the list goes to the server log every 25 MB
+const consoleLoggedFiles = new Set();
+const CONSOLE_FILE_LOG_LIMIT = 200;
 let statTotal = 0, statNext = 25 * 1048576, statT0 = performance.now();
+function logFileStart(f, start, end) {
+	if (consoleLoggedFiles.has(f.path) || consoleLoggedFiles.size > CONSOLE_FILE_LOG_LIMIT) return;
+	consoleLoggedFiles.add(f.path);
+	if (consoleLoggedFiles.size <= CONSOLE_FILE_LOG_LIMIT) {
+		console.info('[io] Loading game file:', f.path, `(${start}-${end}, ${f.size} bytes)`);
+	} else {
+		console.info('[io] Suppressing further per-file start messages; loading continues.');
+	}
+}
 function tally(f, n) {
 	fileBytes.set(f.path, (fileBytes.get(f.path) || 0) + n);
 	statTotal += n;
@@ -186,6 +197,7 @@ async function verifyOPFSCache(rootDir) {
 }
 
 async function downloadAndExtractPipeline(rootDir) {
+  console.info(`[io] ZIP cache is missing; downloading and extracting ${TOTAL_PARTS} parts.`);
   for (let i = 1; i <= TOTAL_PARTS; i++) {
     const releaseUrl = i === 1
       ? PROXY_PART_01_URL
@@ -193,7 +205,9 @@ async function downloadAndExtractPipeline(rootDir) {
     const fileUrl = new URL(useLocalZipProxy ? LOCAL_ZIP_PROXY + releaseUrl : releaseUrl, self.location.href);
     if (useLocalZipProxy) fileUrl.searchParams.set('sourceBase', i === 1 ? localZipPart1Base : localZipRestBase);
 
-    console.log(`[io_worker] Current target URL (Part ${i}/${TOTAL_PARTS}):`, fileUrl);
+    const partName = `playgta5-part-${String(i).padStart(2, '0')}-of-${TOTAL_PARTS}.zip`;
+    const partStarted = performance.now();
+    console.info(`[io] Downloading ZIP part ${i}/${TOTAL_PARTS}: ${fileUrl}`);
 
     self.postMessage({
       progress: {
@@ -203,42 +217,59 @@ async function downloadAndExtractPipeline(rootDir) {
       }
     });
 
-    log(`[io_worker] Fetching release stream: ${fileUrl}`);
-    const response = await fetch(fileUrl);
-    if (!response.ok) throw new Error(`HTTP ${response.status} downloading part ${i}`);
+    try {
+      const response = await fetch(fileUrl);
+      if (!response.ok) throw new Error(`HTTP ${response.status} downloading part ${i}`);
+      console.info(`[io] ZIP part ${i}/${TOTAL_PARTS} response received (${response.headers.get('Content-Length') || 'unknown'} bytes); starting extraction.`);
 
-    if (i === 1) {
-      const part1Buffer = new Uint8Array(await response.arrayBuffer());
-      await extractPartOneHeaders(part1Buffer, rootDir);
-    } else {
-      await decompressZipStream(response.body, rootDir);
+      if (i === 1) {
+        const part1Buffer = new Uint8Array(await response.arrayBuffer());
+        console.info(`[io] Extracting ${partName} (${part1Buffer.length} bytes, buffered).`);
+        await extractPartOneHeaders(part1Buffer, rootDir, i);
+      } else {
+        console.info(`[io] Extracting ${partName} (streaming).`);
+        await decompressZipStream(response.body, rootDir, i);
+      }
+    } catch (error) {
+      console.error(`[io] ZIP part ${i}/${TOTAL_PARTS} failed:`, error);
+      throw error;
     }
+    console.info(`[io] Finished ${partName} in ${((performance.now() - partStarted) / 1000).toFixed(1)} s.`);
   }
+  console.info('[io] All ZIP parts have been extracted.');
 }
 
-async function extractPartOneHeaders(uint8Buffer, rootDir) {
+async function extractPartOneHeaders(uint8Buffer, rootDir, part) {
   const unzipped = unzipSync(uint8Buffer);
   const savePromises = [];
+  let fileCount = 0, totalBytes = 0;
 
   for (const [filePath, fileData] of Object.entries(unzipped)) {
     if (!filePath.endsWith('/') && fileData.length > 0) {
       const cleanPath = filePath.replace(/^\.?\//, '');
+      fileCount++; totalBytes += fileData.length;
+      if (fileCount === 1 || fileCount % 100 === 0) console.info(`[io] ZIP part ${part}/${TOTAL_PARTS}: extracting file ${fileCount}: ${cleanPath}`);
       savePromises.push(saveFileToOPFS(rootDir, cleanPath, fileData));
     }
   }
   await Promise.all(savePromises);
+  console.info(`[io] ZIP part ${part}/${TOTAL_PARTS}: extracted ${fileCount} files (${(totalBytes / 1048576).toFixed(1)} MB).`);
 }
 
-function decompressZipStream(stream, rootDir) {
+function decompressZipStream(stream, rootDir, part) {
   return new Promise((resolve, reject) => {
-    let pendingWrites = 0, inputDone = false, failed = false;
+    let pendingWrites = 0, inputDone = false, failed = false, fileCount = 0, totalBytes = 0;
     const fail = (error) => {
       if (failed) return;
       failed = true;
+      console.error(`[io] ZIP part ${part}/${TOTAL_PARTS} extraction failed:`, error);
       reject(error);
     };
     const finish = () => {
-      if (inputDone && pendingWrites === 0 && !failed) resolve();
+      if (inputDone && pendingWrites === 0 && !failed) {
+        console.info(`[io] ZIP part ${part}/${TOTAL_PARTS}: extracted ${fileCount} files (${(totalBytes / 1048576).toFixed(1)} MB).`);
+        resolve();
+      }
     };
     const unzip = new Unzip((file) => {
       if (file.name.endsWith('/')) return;
@@ -252,6 +283,8 @@ function decompressZipStream(stream, rootDir) {
 
         if (final) {
           const completeBuffer = concatTypedArrays(fileData);
+          fileCount++; totalBytes += completeBuffer.length;
+          if (fileCount === 1 || fileCount % 100 === 0) console.info(`[io] ZIP part ${part}/${TOTAL_PARTS}: extracted file ${fileCount}: ${relativePath}`);
           pendingWrites++;
           saveFileToOPFS(rootDir, relativePath, completeBuffer).then(() => {
             pendingWrites--;
@@ -358,6 +391,7 @@ function batchFetch(runsIn, compressed, wanted) {
 		if (!skip) storeEnd += bytes;
 		return { id: r.id, a: r.a, b: r.b, f, bytes, offset, skip };
 	});
+	for (const r of runs) if (!r.skip) logFileStart(r.f, r.a * BS, r.a * BS + r.bytes - 1);
 	netStat.started++; if (++netStat.active > netStat.maxActive) netStat.maxActive = netStat.active;
 	const p = (async () => {
 		const body = JSON.stringify(runs.map((r) => [r.f.path, r.a * BS, r.a * BS + r.bytes - 1]));
@@ -408,7 +442,8 @@ function batchFetch(runsIn, compressed, wanted) {
 const RUN_LANES = 32, BATCH_LANES = 4, RUN_GAP = 64;		// RUN_GAP: blocks; two ranges of a file closer than this are fetched as one (the bytes between are read next to them)
 async function prefetch(name) {
 	let set;
-	try { const r = await fetchRetry(base + name, { cache: 'no-store' }); if (!r.ok) return; set = await r.json(); } catch (e) { return; }
+	console.info('[io] Loading boot read set:', base + name);
+	try { const r = await fetchRetry(base + name, { cache: 'no-store' }); if (!r.ok) { console.warn('[io] Boot read set unavailable:', r.status, name); return; } set = await r.json(); } catch (e) { console.warn('[io] Could not load boot read set:', name, e); return; }
 	// in boot order: compressible small files whole, in compressed batches; everything else as runs of at most MAX_RUN blocks (1 MB)
 	const runs = [], batches = [];
 	let cbatch = [], cbytes = 0;
@@ -432,6 +467,7 @@ async function prefetch(name) {
 	}
 	if (cbatch.length) batches.push(cbatch);
 	const t0 = performance.now();
+	console.info(`[io] Prefetching boot set: ${set.length} files, ${runs.length} ranges, ${batches.length} compressed batches.`);
 	log('[io] prefetching the boot set: ' + set.length + ' files, ' + runs.length + ' ranges, ' + batches.length + ' compressed batches');
 	let nextRun = 0, nextBatch = 0;
 	const runLane = async () => {
@@ -447,6 +483,7 @@ async function prefetch(name) {
 		}
 	};
 	await Promise.all([...Array.from({ length: RUN_LANES }, runLane), ...Array.from({ length: BATCH_LANES }, batchLane)]);
+	console.info(`[io] Boot set prefetched in ${((performance.now() - t0) / 1000).toFixed(1)} s; ${(statTotal / 1048576).toFixed(1)} MB fetched so far.`);
 	log('[io] boot set prefetched in ' + ((performance.now() - t0) / 1000 | 0) + ' s, ' + (statTotal / 1048576 | 0) + ' MB fetched so far; ' + (netStat.batchCached || 0) + ' of ' + batches.length + ' batches from the host\'s static copies, ' + (netStat.retries || 0) + ' retried requests');
 }
 
@@ -478,11 +515,21 @@ async function fetchRange(f, start, end, onChunk, whole, low) {
 }
 async function fetchRangeRaw(f, start, end, onChunk, whole, low) {
 	const url = base + f.path.split('/').map(encodeURIComponent).join('/') + dataQuery;		// ?v=<manifest version>: the same URL always has the same bytes, so the host (and Cloudflare, with a rule for /data/) may cache it for ever
+	logFileStart(f, start, end);
 	// no-store: the host's own static serving of a range (Apache, host/data/.htaccess) sends no Cache-Control, and Chrome would keep every 206 in its HTTP cache next to this store
 	const init = { cache: 'no-store', priority: low ? 'low' : 'high' };
 	if (!whole) init.headers = { Range: 'bytes=' + start + '-' + end };		// whole: the server sends a compressed copy, the browser decodes it
-	const res = await fetchRetry(url, init);
-	if (res.status !== 206 && res.status !== 200) throw new Error('HTTP ' + res.status + ' for ' + f.path);
+	let res;
+	try {
+		res = await fetchRetry(url, init);
+	} catch (error) {
+		console.error('[io] Network request failed for game file:', f.path, error);
+		throw error;
+	}
+	if (res.status !== 206 && res.status !== 200) {
+		console.error(`[io] Game file request returned HTTP ${res.status}:`, f.path);
+		throw new Error('HTTP ' + res.status + ' for ' + f.path);
+	}
 	let skip = res.status === 200 ? start : 0;		// a server that ignores Range sends the whole file
 	const total = end - start + 1;
 	const reader = res.body.getReader();
@@ -666,6 +713,7 @@ async function serve(slot) {
 			} else result = await readWithoutStore(id, off, len, dst);
 		}
 	} catch (e) {
+		console.error('[io] Engine file read failed:', e);
 		log('[io] read failed: ' + e.message);
 	}
 	views();
@@ -736,25 +784,39 @@ async function loop() {
 let ready = null;
 async function init(m) {
 	base = m.base; bc = new BroadcastChannel('game-progress'); remoteLog = !!m.log; noHints = !!m.noHints;
-	
-	// Automated OPFS asset unpack check before initializing engine files
+	console.info('[io] Checking extracted game-data cache in OPFS.');
 	const rootDir = await navigator.storage.getDirectory();
 	const isCached = await verifyOPFSCache(rootDir);
 	if (!isCached) {
+		console.info('[io] Extracted game-data cache not found.');
 		log('[io_worker] Pre-cache missing. Starting automated 14-part stream...');
 		await downloadAndExtractPipeline(rootDir);
 		await saveFileToOPFS(rootDir, CACHE_MARKER, new Uint8Array());
+		console.info('[io] Wrote ZIP extraction cache marker.');
+	} else {
+		console.info('[io] Extracted game-data cache found; skipping ZIP downloads.');
 	}
 	bc.postMessage({ assetsReady: true });
 
-	const j = await (await fetchRetry(base + 'manifest.json', { cache: 'no-store' })).json();
+	console.info('[io] Loading game-data manifest:', base + 'manifest.json');
+	let j;
+	try {
+		const response = await fetchRetry(base + 'manifest.json', { cache: 'no-store' });
+		if (!response.ok) throw new Error('HTTP ' + response.status);
+		j = await response.json();
+	} catch (error) {
+		console.error('[io] Failed to load game-data manifest:', error);
+		throw error;
+	}
 	files = j.files.map((f) => ({ path: f[0], size: f[1] }));
 	dataQuery = j.version ? '?v=' + encodeURIComponent(j.version) : ''; dataVersion = j.version ? String(j.version) : '';
 	files.forEach((f, i) => pathIndex.set(f.path, i));
+	console.info(`[io] Loaded manifest version ${j.version || '(unspecified)'} with ${files.length} files.`);
 	recording = !!m.record; traceOn = !!m.trace;
 	if (remoteLog) startNetStats();
 	if (!m.noStore) await openStore(Number(String(j.version).replace(/\D/g, '')) || 0);
 	if (sh && m.bootset && !m.record) prefetch(m.bootset);
+	else console.info('[io] Boot-set prefetch skipped:', !sh ? 'persistent store unavailable' : 'recording mode enabled');
 }
 
 // The page tells us when it is going away (pagehide): close the handles at once so the next load can take them.
