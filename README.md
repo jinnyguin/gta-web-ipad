@@ -49,13 +49,14 @@ And don't email me for asking the mirror folder. I will not reply to the email.
 
 ## Local split-ZIP source
 
-For the Cloudflare Pages site, open it with `?localzip=1` to enable local ZIP
-mode. In the **Use your local ZIP files** panel, enter the localhost directory
-URLs for part 1 and parts 2–14. The game will not start until both URLs are
-saved. Each directory
+On Cloudflare Pages, local ZIP mode is enabled by default. In the **Use your
+local ZIP files** panel, enter the localhost directory URLs for part 1 and
+parts 2–14. The game will not start until both URLs are saved. **Clear saved
+paths** removes them and disables local ZIP mode. Add `?localzip=0` to use the
+site's standard ZIP source instead. Each directory
 must serve `playgta5-part-01-of-14.zip` or `playgta5-part-02-of-14.zip` through
 `playgta5-part-14-of-14.zip`, respectively. The paths are saved in that
-browser's local storage; use **Clear saved paths** to remove them.
+browser's local storage.
 
 Run local file servers for those directories, for example:
 
@@ -72,7 +73,7 @@ servers do not need CORS enabled.
 
 ## iPhone and memory32
 
-The page selects the 32-bit engine on iPhone, iPad, and browsers without shared memory64 support. To test the same path on desktop, open `/?memory=32`. This path enables the low-memory profile by default. Add `&low=0` to override it for testing.
+The page automatically selects the 32-bit engine and low-memory profile on iPhone, iPad, and browsers without shared memory64 support. To test the same path on desktop, open `/?memory=32`. Add `&low=0` to override the low-memory profile for testing.
 
 The ZIP includes `game-memory32.js` and `game-memory32.wasm` in `mirror/playgta5.com/b/8b0b5899ed/`. Merge the contents of your existing `mirror/playgta5.com/` into that folder tree to add the matching game data, shaders, and worker scripts. Keep both `game-memory32` files together in the build directory.
 

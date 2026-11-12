@@ -67,7 +67,7 @@
 
 <script type="module">
 const q = new URLSearchParams(location.search);
-const localZipMode = q.get('localzip') === '1' || q.get('localzips') === '1';
+const localZipMode = q.get('localzip') !== '0' && q.get('localzips') !== '0';
 const LOCAL_ZIP_PART1_KEY = 'gta-local-zip-part1-base';
 const LOCAL_ZIP_REST_KEY = 'gta-local-zip-rest-base';
 
@@ -109,7 +109,7 @@ function getLocalZipBases() {
 	document.getElementById('clear-local-zip').addEventListener('click', () => {
 		localStorage.removeItem(LOCAL_ZIP_PART1_KEY);
 		localStorage.removeItem(LOCAL_ZIP_REST_KEY);
-		q.delete('localzip');
+		q.set('localzip', '0');
 		q.delete('localzips');
 		location.search = q.toString();
 	});
@@ -465,8 +465,8 @@ function supportsMemory64() {
 let lowMemory = false;
 let startSize = [1280, 720], wantSize = null;
 
-// File Picker Integration: Function to launch the loader worker once a file is selected
-function launchLoaderWorker(selectedFile) {
+// Start the loader worker after validating browser support and local ZIP settings.
+function launchLoaderWorker() {
 	let localZipBases = null;
 	if (localZipMode) {
 		try {
@@ -530,12 +530,14 @@ function launchLoaderWorker(selectedFile) {
 		if (ev.data.input) installInput(ev.data.input.memory, ev.data.input.block);
 		if (ev.data.audio) { audioPending = ev.data.audio; tryStartAudio(); }
 	};
-	worker.onerror = (e) => { hud.textContent = 'worker error: ' + e.message; };
+	worker.onerror = (e) => {
+		failStartup('Loader worker failed' + (e.message ? ': ' + e.message : '.'));
+		clearInterval(tickTimer);
+		worker.terminate();
+	};
 
-	// Post message to loader.js including the selected File handle
 	worker.postMessage({
 		canvas: offscreen,
-		fileHandle: selectedFile, // <--- Transferred File Object handle
 		base: BASE,
 		memory32,
 		args: ['-rootdir=/game/', ...(q.get('nogpu') ? [] : ['-wgpu']), '-nodisplaycalibration', '-noSocialClub', '-pc:nosocialclub', ...(q.get('newgame') === '1' ? ['-noautoload'] : []), '-nonetwork', '-output', '-width=' + startSize[0], '-height=' + startSize[1], '-forceResolution', ...LOG_ARGS, ...ENGINE_ARGS, '-frameLimit=' + (q.get('fps') === '30' ? 2 : q.get('fps') === '0' ? 0 : 1),
@@ -558,23 +560,7 @@ function launchLoaderWorker(selectedFile) {
 	}, [offscreen]);
 }
 
-// UI Event Listener to trigger launch on file selection
-const fileInput = document.getElementById('mirrorFileInput');
-const fileStatus = document.getElementById('fileStatus');
-const overlay = document.getElementById('archive-picker-overlay');
-
-fileInput.addEventListener('change', (event) => {
-	const file = event.target.files[0];
-	if (!file) return;
-
-	const sizeGB = (file.size / (1024 ** 3)).toFixed(2);
-	fileStatus.innerHTML = `<span style="color: #0f0;">Mounted:</span> ${file.name} (${sizeGB} GB)`;
-	
-	setTimeout(() => {
-		overlay.style.display = 'none';
-		launchLoaderWorker(file);
-	}, 400);
-});
+if (!startupFailed) launchLoaderWorker();
 
 if (remoteLog && (q.get('mem') || lowMemory) && performance.measureUserAgentSpecificMemory) {
 	const report = async () => {

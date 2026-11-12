@@ -189,12 +189,13 @@ class LocalBuildHandler(Handler):
     def translate_path(self, path):
         route = urlsplit(path).path
         if route in ('/', '/index.html'):
-            return str(PROJECT / 'homepage.html')
+            return str(PROJECT / 'index.html')
         build_files = {
             '/b/8b0b5899ed/loader.js': 'loader.js',
             '/b/8b0b5899ed/io_worker.js': 'io_worker.js',
             '/b/8b0b5899ed/wgpu_worker.js': 'wgpu_worker.js',
             '/b/8b0b5899ed/game.js': 'game.js',
+            '/data/manifest.json': 'data-manifest.json',
         }
         if route in build_files:
             return str(PROJECT / build_files[route])
