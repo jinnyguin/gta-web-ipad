@@ -8,7 +8,12 @@ from urllib.parse import urlsplit, unquote, parse_qs
 
 PROJECT = Path(__file__).resolve().parent
 ROOT = PROJECT / 'mirror' / 'playgta5.com'
-PAGES_ORIGIN = 'https://gta-web-ipad.pages.dev'
+
+def is_pages_origin(origin):
+    parsed = urlsplit(origin or '')
+    host = (parsed.hostname or '').lower()
+    return parsed.scheme == 'https' and (host == 'gta-web-ipad.pages.dev' or host.endswith('.gta-web-ipad.pages.dev'))
+
 class NoRedirectHandler(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, new_url):
         return None
@@ -133,8 +138,9 @@ class LocalBuildHandler(Handler):
         return '%s://%s%s' % (source.scheme, source.netloc, path)
 
     def end_headers(self):
-        if self.zip_proxy_route() and self.headers.get('Origin') == PAGES_ORIGIN:
-            self.send_header('Access-Control-Allow-Origin', PAGES_ORIGIN)
+        origin = self.headers.get('Origin')
+        if self.zip_proxy_route() and is_pages_origin(origin):
+            self.send_header('Access-Control-Allow-Origin', origin)
             self.send_header('Access-Control-Allow-Methods', 'GET, OPTIONS')
             self.send_header('Access-Control-Allow-Private-Network', 'true')
             self.send_header('Vary', 'Origin')
@@ -144,7 +150,7 @@ class LocalBuildHandler(Handler):
         if not self.zip_proxy_route():
             self.send_error(404)
             return
-        if self.headers.get('Origin') != PAGES_ORIGIN:
+        if not is_pages_origin(self.headers.get('Origin')):
             self.send_error(403, 'Origin is not allowed')
             return
         self.send_response(204)
@@ -155,7 +161,7 @@ class LocalBuildHandler(Handler):
         match = self.zip_proxy_route()
         if not match:
             return super().do_GET()
-        if self.headers.get('Origin') != PAGES_ORIGIN:
+        if not is_pages_origin(self.headers.get('Origin')):
             self.send_error(403, 'Origin is not allowed')
             return
 

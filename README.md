@@ -69,7 +69,10 @@ Keep both source servers running. Start `Launch-Local.cmd` to run the localhost
 proxy, enter their base URLs (for example `http://localhost:500/` and
 `https://localhost:10000/`), and save. HTTP and HTTPS localhost sources are
 accepted; the proxy serves the expected ZIP filename for each part, so source
-servers do not need CORS enabled.
+servers do not need CORS enabled. The proxy must run on the same device as the
+browser because its address is `127.0.0.1:8000`; on an iPhone, a proxy running
+on a PC is not reachable as `localhost`. Cloudflare Pages preview hostnames
+are accepted by the proxy's private-network CORS check.
 
 ## iPhone and memory32
 
