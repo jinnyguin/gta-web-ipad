@@ -20,7 +20,7 @@
 //   streamer's single reader thread); fetching it now, HINT_PAR at a time, turns ~3 reads/s (one round trip each) into as many as the link carries. See drainHints.
 'use strict';
 
-import { Unzip, unzipSync } from '/fflate-0.8.2.js';
+import { Unzip, UnzipInflate, unzipSync } from '/fflate-0.8.2.js';
 
 let mem, HEAP32, HEAPU8, table;
 let files = [], base = '', bc = null, pendingBytes = 0, lastPost = 0, noHints = false, dataQuery = '';		// noHints: ?nohints=1 (diagnostics), see drainHints; dataQuery: ?v=<manifest version> on every data URL
@@ -236,7 +236,10 @@ async function verifyOPFSCache(rootDir) {
   }
 }
 
+const opfsDirCache = new Map();
+
 async function downloadAndExtractPipeline(rootDir) {
+  opfsDirCache.clear();
   diagnostic(`[io] ZIP cache is missing; downloading and extracting ${TOTAL_PARTS} parts.`);
   for (let i = 1; i <= TOTAL_PARTS; i++) {
     const releaseUrl = i === 1
@@ -261,16 +264,44 @@ async function downloadAndExtractPipeline(rootDir) {
       if (!response.ok) throw new Error(`HTTP ${response.status} downloading part ${i}`);
       diagnostic(`[io] ZIP part ${i}/${TOTAL_PARTS} response: HTTP ${response.status}, ${response.headers.get('Content-Type') || 'unknown content type'}, ${response.headers.get('Content-Length') || 'unknown'} bytes from ${response.url || fileUrl}; starting extraction.`);
 
-      if (!response.body) throw new Error(`No response body for part ${i}`);
-      diagnostic(`[io] Extracting ${partName} (streaming).`);
-      await decompressZipStream(response.body, rootDir, i);
+      if (i === 1) {
+        const part1Buffer = new Uint8Array(await response.arrayBuffer());
+        diagnostic(`[io] Extracting ${partName} (${part1Buffer.length} bytes, buffered).`);
+        await extractPartOneHeaders(part1Buffer, rootDir, i);
+      } else {
+        if (!response.body) throw new Error(`No response body for part ${i}`);
+        diagnostic(`[io] Extracting ${partName} (streaming).`);
+        await decompressZipStream(response.body, rootDir, i);
+      }
     } catch (error) {
       diagnostic(`[io] ERROR ZIP part ${i}/${TOTAL_PARTS} failed: ${error && (error.stack || error.message) || error}`);
       throw error;
     }
     diagnostic(`[io] Finished ${partName} in ${((performance.now() - partStarted) / 1000).toFixed(1)} s.`);
   }
+  opfsDirCache.clear();
   diagnostic('[io] All ZIP parts have been extracted.');
+}
+
+async function extractPartOneHeaders(uint8Buffer, rootDir, part) {
+  const unzipped = unzipSync(uint8Buffer);
+  const entries = Object.entries(unzipped);
+  let fileCount = 0, totalBytes = 0;
+
+  for (let idx = 0; idx < entries.length; idx++) {
+    const [filePath, fileData] = entries[idx];
+    delete unzipped[filePath];
+    if (!filePath.endsWith('/') && fileData.length > 0) {
+      const cleanPath = filePath.replace(/^\.?\//, '');
+      fileCount++;
+      totalBytes += fileData.length;
+      if (fileCount === 1 || fileCount % 500 === 0) {
+        diagnostic(`[io] ZIP part ${part}/${TOTAL_PARTS}: extracting file ${fileCount}: ${cleanPath}`);
+      }
+      await saveFileToOPFS(rootDir, cleanPath, fileData);
+    }
+  }
+  diagnostic(`[io] ZIP part ${part}/${TOTAL_PARTS}: extracted ${fileCount} files (${(totalBytes / 1048576).toFixed(1)} MB).`);
 }
 
 function decompressZipStream(stream, rootDir, part) {
@@ -326,6 +357,7 @@ function decompressZipStream(stream, rootDir, part) {
       };
       file.start();
     });
+    unzip.register(UnzipInflate);
 
     const reader = stream.getReader();
     function readChunk() {
@@ -356,10 +388,17 @@ async function saveFileToOPFS(rootDir, filePath, uint8Data) {
   const parts = filePath.split('/');
   const filename = parts.pop();
   let currentDir = rootDir;
+  let builtPath = '';
 
   for (const part of parts) {
     if (part && part !== '.') {
-      currentDir = await currentDir.getDirectoryHandle(part, { create: true });
+      builtPath += (builtPath ? '/' : '') + part;
+      let cachedDir = opfsDirCache.get(builtPath);
+      if (!cachedDir) {
+        cachedDir = await currentDir.getDirectoryHandle(part, { create: true });
+        opfsDirCache.set(builtPath, cachedDir);
+      }
+      currentDir = cachedDir;
     }
   }
 
