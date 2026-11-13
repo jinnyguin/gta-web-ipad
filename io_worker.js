@@ -240,108 +240,9 @@ async function verifyOPFSCache(rootDir) {
 
 const opfsDirCache = new Map();
 
-async function downloadAndExtractPipeline(rootDir) {
-  opfsDirCache.clear();
-  diagnostic(`[io] ZIP cache is missing; downloading and extracting ${TOTAL_PARTS} parts.`);
-  for (let i = 1; i <= TOTAL_PARTS; i++) {
-    const partMarker = `part-${String(i).padStart(2, '0')}.done`;
-    try {
-      await rootDir.getFileHandle(partMarker);
-      diagnostic(`[io] Skipping ZIP part ${i}/${TOTAL_PARTS} (already extracted).`);
-      continue;
-    } catch (_) {}
-
-    const releaseUrl = i === 1
-      ? PROXY_PART_01_URL
-      : `${PROXY_PARTS_BASE_URL}${String(i).padStart(2, '0')}-of-${TOTAL_PARTS}.zip`;
-    const fileUrl = new URL(useLocalZipProxy ? LOCAL_ZIP_PROXY + releaseUrl : releaseUrl, self.location.href);
-
-    const partName = `playgta5-part-${String(i).padStart(2, '0')}-of-${TOTAL_PARTS}.zip`;
-    const partStarted = performance.now();
-    diagnostic(`[io] Downloading ZIP part ${i}/${TOTAL_PARTS}: ${fileUrl}`);
-
-    self.postMessage({
-      progress: {
-        current: i,
-        total: TOTAL_PARTS,
-        status: `Downloading & Extracting Part ${i} of ${TOTAL_PARTS}`
-      }
-    });
-
-    try {
-      const response = await fetch(fileUrl);
-      if (!response.ok) throw new Error(`HTTP ${response.status} downloading part ${i}`);
-      diagnostic(`[io] ZIP part ${i}/${TOTAL_PARTS} response: HTTP ${response.status}, ${response.headers.get('Content-Type') || 'unknown content type'}, ${response.headers.get('Content-Length') || 'unknown'} bytes from ${response.url || fileUrl}; starting extraction.`);
-
-      if (i === 1) {
-        const part1Buffer = new Uint8Array(await response.arrayBuffer());
-        diagnostic(`[io] Extracting ${partName} (${part1Buffer.length} bytes, buffered).`);
-        await extractPartOneHeaders(part1Buffer, rootDir, i);
-      } else {
-        if (!response.body) throw new Error(`No response body for part ${i}`);
-        diagnostic(`[io] Extracting ${partName} (streaming).`);
-        await decompressZipStream(response.body, rootDir, i);
-      }
-
-      await saveFileToOPFS(rootDir, partMarker, new Uint8Array());
-    } catch (error) {
-      diagnostic(`[io] ERROR ZIP part ${i}/${TOTAL_PARTS} failed: ${error && (error.stack || error.message) || error}`);
-      throw error;
-    }
-    diagnostic(`[io] Finished ${partName} in ${((performance.now() - partStarted) / 1000).toFixed(1)} s.`);
-  }
-  opfsDirCache.clear();
-  diagnostic('[io] All ZIP parts have been extracted.');
-}
-
-async function extractPartOneHeaders(uint8Buffer, rootDir, part) {
-  const unzipped = unzipSync(uint8Buffer);
-  const entries = Object.entries(unzipped);
-  let fileCount = 0, totalBytes = 0;
-
-  for (let idx = 0; idx < entries.length; idx++) {
-    const [filePath, fileData] = entries[idx];
-    delete unzipped[filePath];
-    if (!filePath.endsWith('/') && fileData.length > 0) {
-      const cleanPath = filePath.replace(/^\.?\//, '');
-      fileCount++;
-      totalBytes += fileData.length;
-      if (fileCount === 1 || fileCount % 500 === 0) {
-        diagnostic(`[io] ZIP part ${part}/${TOTAL_PARTS}: extracting file ${fileCount}: ${cleanPath}`);
-      }
-      await saveFileToOPFS(rootDir, cleanPath, fileData);
-    }
-  }
-  diagnostic(`[io] ZIP part ${part}/${TOTAL_PARTS}: extracted ${fileCount} files (${(totalBytes / 1048576).toFixed(1)} MB).`);
-}
-
-async function openOPFSWriteHandle(rootDir, filePath) {
-  const parts = filePath.split('/');
-  const filename = parts.pop();
-  let currentDir = rootDir;
-  let builtPath = '';
-
-  for (const part of parts) {
-    if (part && part !== '.') {
-      builtPath += (builtPath ? '/' : '') + part;
-      let cachedDir = opfsDirCache.get(builtPath);
-      if (!cachedDir) {
-        cachedDir = await currentDir.getDirectoryHandle(part, { create: true });
-        opfsDirCache.set(builtPath, cachedDir);
-      }
-      currentDir = cachedDir;
-    }
-  }
-
-  const fileHandle = await currentDir.getFileHandle(filename, { create: true });
-  const accessHandle = await fileHandle.createSyncAccessHandle();
-  accessHandle.truncate(0);
-  return accessHandle;
-}
-
 function decompressZipStream(stream, rootDir, part) {
   return new Promise((resolve, reject) => {
-    let inputDone = false, failed = false, activeFile = false, fileCount = 0, totalBytes = 0;
+    let inputDone = false, failed = false, paused = false, pendingOps = 0, fileCount = 0, totalBytes = 0, lastProgressLog = performance.now();
     const reader = stream.getReader();
 
     const fail = (error) => {
@@ -353,9 +254,16 @@ function decompressZipStream(stream, rootDir, part) {
     };
 
     const finish = () => {
-      if (inputDone && !activeFile && !failed) {
+      if (inputDone && pendingOps === 0 && !failed) {
         diagnostic(`[io] ZIP part ${part}/${TOTAL_PARTS}: extracted ${fileCount} files (${(totalBytes / 1048576).toFixed(1)} MB).`);
         resolve();
+      }
+    };
+
+    const resumeRead = () => {
+      if (paused && pendingOps < 8 && !failed) {
+        paused = false;
+        readChunk();
       }
     };
 
@@ -363,24 +271,29 @@ function decompressZipStream(stream, rootDir, part) {
       if (file.name.endsWith('/')) return;
 
       const relativePath = file.name.replace(/^\.?\//, '');
-      activeFile = true;
       fileCount++;
       if (fileCount === 1 || fileCount % 500 === 0) {
         diagnostic(`[io] ZIP part ${part}/${TOTAL_PARTS}: streaming file ${fileCount}: ${relativePath}`);
       }
 
       let writeOffset = 0;
-      let opChain = openOPFSWriteHandle(rootDir, relativePath);
+      pendingOps++;
+      let opChain = openOPFSWriteHandle(rootDir, relativePath).then((handle) => {
+        pendingOps--;
+        resumeRead();
+        return handle;
+      });
 
       file.ondata = (err, chunk, final) => {
         if (err) {
-          opChain.then((h) => h.close()).catch(() => {});
+          opChain.then((h) => h && h.close()).catch(() => {});
           return fail(err);
         }
 
+        pendingOps++;
         opChain = opChain.then((accessHandle) => {
           if (failed) {
-            accessHandle.close();
+            if (accessHandle) accessHandle.close();
             return null;
           }
           if (chunk && chunk.length > 0) {
@@ -388,15 +301,20 @@ function decompressZipStream(stream, rootDir, part) {
             writeOffset += chunk.length;
             totalBytes += chunk.length;
           }
+          if (performance.now() - lastProgressLog > 5000) {
+            lastProgressLog = performance.now();
+            diagnostic(`[io] ZIP part ${part}/${TOTAL_PARTS}: ${(totalBytes / 1048576).toFixed(1)} MB written (${relativePath})...`);
+          }
           if (final) {
             accessHandle.flush();
             accessHandle.close();
-            activeFile = false;
-            finish();
-            readChunk();
             return null;
           }
           return accessHandle;
+        }).finally(() => {
+          pendingOps--;
+          resumeRead();
+          finish();
         }).catch((e) => {
           fail(e);
         });
@@ -407,7 +325,7 @@ function decompressZipStream(stream, rootDir, part) {
     unzip.register(UnzipInflate);
 
     function readChunk() {
-      if (failed || activeFile) return;
+      if (failed) return;
       reader.read().then(({ done, value }) => {
         if (done) {
           inputDone = true;
@@ -424,22 +342,16 @@ function decompressZipStream(stream, rootDir, part) {
         } catch (error) {
           return fail(error);
         }
-        if (!activeFile) readChunk();
+        if (pendingOps >= 8) {
+          paused = true;
+        } else {
+          readChunk();
+        }
       }).catch(fail);
     }
 
     readChunk();
   });
-}
-
-async function saveFileToOPFS(rootDir, filePath, uint8Data) {
-  const accessHandle = await openOPFSWriteHandle(rootDir, filePath);
-  try {
-    accessHandle.write(uint8Data, { at: 0 });
-    accessHandle.flush();
-  } finally {
-    accessHandle.close();
-  }
 }
 
 function concatTypedArrays(arrays) {
