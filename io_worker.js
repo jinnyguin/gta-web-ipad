@@ -228,152 +228,252 @@ const localZipPart1Base = ioWorkerUrl.searchParams.get('zip1') || '';
 const localZipRestBase = ioWorkerUrl.searchParams.get('ziprest') || '';
 
 async function verifyOPFSCache(rootDir) {
-  try {
-    await rootDir.getFileHandle(CACHE_MARKER);
-    diagnostic(`[io] ZIP extraction cache marker found: ${CACHE_MARKER}.`);
-    return true;
-  } catch (err) {
-    diagnostic(`[io] ZIP extraction cache marker missing: ${CACHE_MARKER} (${err.name || 'error'}).`);
-    return false;
-  }
+	try {
+		await rootDir.getFileHandle(CACHE_MARKER);
+		diagnostic(`[io] ZIP extraction cache marker found: ${CACHE_MARKER}.`);
+		return true;
+	} catch (err) {
+		diagnostic(`[io] ZIP extraction cache marker missing: ${CACHE_MARKER} (${err.name || 'error'}).`);
+		return false;
+	}
 }
 
 const opfsDirCache = new Map();
 
-function decompressZipStream(stream, rootDir, part) {
-  return new Promise((resolve, reject) => {
-    let inputDone = false, failed = false, paused = false, pendingOps = 0, fileCount = 0, totalBytes = 0, lastProgressLog = performance.now();
-    const reader = stream.getReader();
+async function downloadAndExtractPipeline(rootDir) {
+	opfsDirCache.clear();
+	diagnostic(`[io] ZIP cache is missing; downloading and extracting ${TOTAL_PARTS} parts.`);
+	for (let i = 1; i <= TOTAL_PARTS; i++) {
+		const partMarker = `part-${String(i).padStart(2, '0')}.done`;
+		try {
+			await rootDir.getFileHandle(partMarker);
+			diagnostic(`[io] Skipping ZIP part ${i}/${TOTAL_PARTS} (already extracted).`);
+			continue;
+		} catch (_) {}
 
-    const fail = (error) => {
-      if (failed) return;
-      failed = true;
-      const detail = error && (error.stack || error.message) || String(error);
-      diagnostic(`[io] ERROR ZIP part ${part}/${TOTAL_PARTS} extraction failed: ${detail}`);
-      reject(error);
-    };
+		const releaseUrl = i === 1
+			? PROXY_PART_01_URL
+			: `${PROXY_PARTS_BASE_URL}${String(i).padStart(2, '0')}-of-${TOTAL_PARTS}.zip`;
+		const fileUrl = new URL(useLocalZipProxy ? LOCAL_ZIP_PROXY + releaseUrl : releaseUrl, self.location.href);
 
-    const finish = () => {
-      if (inputDone && pendingOps === 0 && !failed) {
-        diagnostic(`[io] ZIP part ${part}/${TOTAL_PARTS}: extracted ${fileCount} files (${(totalBytes / 1048576).toFixed(1)} MB).`);
-        resolve();
-      }
-    };
+		const partName = `playgta5-part-${String(i).padStart(2, '0')}-of-${TOTAL_PARTS}.zip`;
+		const partStarted = performance.now();
+		diagnostic(`[io] Downloading ZIP part ${i}/${TOTAL_PARTS}: ${fileUrl}`);
 
-    const resumeRead = () => {
-      if (paused && pendingOps < 8 && !failed) {
-        paused = false;
-        readChunk();
-      }
-    };
+		self.postMessage({
+			progress: {
+				current: i,
+				total: TOTAL_PARTS,
+				status: `Downloading & Extracting Part ${i} of ${TOTAL_PARTS}`
+			}
+		});
 
-    const unzip = new Unzip((file) => {
-      if (file.name.endsWith('/')) return;
+		try {
+			const response = await fetch(fileUrl);
+			if (!response.ok) throw new Error(`HTTP ${response.status} downloading part ${i}`);
+			diagnostic(`[io] ZIP part ${i}/${TOTAL_PARTS} response: HTTP ${response.status}, ${response.headers.get('Content-Type') || 'unknown content type'}, ${response.headers.get('Content-Length') || 'unknown'} bytes from ${response.url || fileUrl}; starting extraction.`);
 
-      const relativePath = file.name.replace(/^\.?\//, '');
-      fileCount++;
-      if (fileCount === 1 || fileCount % 500 === 0) {
-        diagnostic(`[io] ZIP part ${part}/${TOTAL_PARTS}: streaming file ${fileCount}: ${relativePath}`);
-      }
+			if (i === 1) {
+				const part1Buffer = new Uint8Array(await response.arrayBuffer());
+				diagnostic(`[io] Extracting ${partName} (${part1Buffer.length} bytes, buffered).`);
+				await extractPartOneHeaders(part1Buffer, rootDir, i);
+			} else {
+				if (!response.body) throw new Error(`No response body for part ${i}`);
+				diagnostic(`[io] Extracting ${partName} (streaming).`);
+				await decompressZipStream(response.body, rootDir, i);
+			}
 
-      let writeOffset = 0;
-      pendingOps++;
-      let opChain = openOPFSWriteHandle(rootDir, relativePath).then((handle) => {
-        pendingOps--;
-        resumeRead();
-        return handle;
-      });
-
-      file.ondata = (err, chunk, final) => {
-        if (err) {
-          opChain.then((h) => h && h.close()).catch(() => {});
-          return fail(err);
-        }
-
-        pendingOps++;
-        opChain = opChain.then((accessHandle) => {
-          if (failed) {
-            if (accessHandle) accessHandle.close();
-            return null;
-          }
-          if (chunk && chunk.length > 0) {
-            accessHandle.write(chunk, { at: writeOffset });
-            writeOffset += chunk.length;
-            totalBytes += chunk.length;
-          }
-          if (performance.now() - lastProgressLog > 5000) {
-            lastProgressLog = performance.now();
-            diagnostic(`[io] ZIP part ${part}/${TOTAL_PARTS}: ${(totalBytes / 1048576).toFixed(1)} MB written (${relativePath})...`);
-          }
-          if (final) {
-            accessHandle.flush();
-            accessHandle.close();
-            return null;
-          }
-          return accessHandle;
-        }).finally(() => {
-          pendingOps--;
-          resumeRead();
-          finish();
-        }).catch((e) => {
-          fail(e);
-        });
-      };
-
-      file.start();
-    });
-    unzip.register(UnzipInflate);
-
-    function readChunk() {
-      if (failed) return;
-      reader.read().then(({ done, value }) => {
-        if (done) {
-          inputDone = true;
-          try {
-            unzip.flush();
-            finish();
-          } catch (error) {
-            fail(error);
-          }
-          return;
-        }
-        try {
-          unzip.push(value);
-        } catch (error) {
-          return fail(error);
-        }
-        if (pendingOps >= 8) {
-          paused = true;
-        } else {
-          readChunk();
-        }
-      }).catch(fail);
-    }
-
-    readChunk();
-  });
+			await saveFileToOPFS(rootDir, partMarker, new Uint8Array());
+		} catch (error) {
+			diagnostic(`[io] ERROR ZIP part ${i}/${TOTAL_PARTS} failed: ${error && (error.stack || error.message) || error}`);
+			throw error;
+		}
+		diagnostic(`[io] Finished ${partName} in ${((performance.now() - partStarted) / 1000).toFixed(1)} s.`);
+	}
+	opfsDirCache.clear();
+	diagnostic('[io] All ZIP parts have been extracted.');
 }
+
+async function extractPartOneHeaders(uint8Buffer, rootDir, part) {
+	const unzipped = unzipSync(uint8Buffer);
+	const entries = Object.entries(unzipped);
+	let fileCount = 0, totalBytes = 0;
+
+	for (let idx = 0; idx < entries.length; idx++) {
+		const [filePath, fileData] = entries[idx];
+		delete unzipped[filePath];
+		if (!filePath.endsWith('/') && fileData.length > 0) {
+			const cleanPath = filePath.replace(/^\.?\//, '');
+			fileCount++;
+			totalBytes += fileData.length;
+			if (fileCount === 1 || fileCount % 500 === 0) {
+				diagnostic(`[io] ZIP part ${part}/${TOTAL_PARTS}: extracting file ${fileCount}: ${cleanPath}`);
+			}
+			await saveFileToOPFS(rootDir, cleanPath, fileData);
+		}
+	}
+	diagnostic(`[io] ZIP part ${part}/${TOTAL_PARTS}: extracted ${fileCount} files (${(totalBytes / 1048576).toFixed(1)} MB).`);
+}
+
+async function openOPFSWriteHandle(rootDir, filePath) {
+	const parts = filePath.split('/');
+	const filename = parts.pop();
+	let currentDir = rootDir;
+	let builtPath = '';
+
+	for (const part of parts) {
+		if (part && part !== '.') {
+			builtPath += (builtPath ? '/' : '') + part;
+			let cachedDir = opfsDirCache.get(builtPath);
+			if (!cachedDir) {
+				cachedDir = await currentDir.getDirectoryHandle(part, { create: true });
+				opfsDirCache.set(builtPath, cachedDir);
+			}
+			currentDir = cachedDir;
+		}
+	}
+
+	const fileHandle = await currentDir.getFileHandle(filename, { create: true });
+	const accessHandle = await fileHandle.createSyncAccessHandle();
+	accessHandle.truncate(0);
+	return accessHandle;
+}
+
+function decompressZipStream(stream, rootDir, part) {
+	return new Promise((resolve, reject) => {
+		let inputDone = false, failed = false, paused = false, pendingOps = 0, fileCount = 0, totalBytes = 0, lastProgressLog = performance.now();
+		const reader = stream.getReader();
+
+		const fail = (error) => {
+			if (failed) return;
+			failed = true;
+			const detail = error && (error.stack || error.message) || String(error);
+			diagnostic(`[io] ERROR ZIP part ${part}/${TOTAL_PARTS} extraction failed: ${detail}`);
+			reject(error);
+		};
+
+		const finish = () => {
+			if (inputDone && pendingOps === 0 && !failed) {
+				diagnostic(`[io] ZIP part ${part}/${TOTAL_PARTS}: extracted ${fileCount} files (${(totalBytes / 1048576).toFixed(1)} MB).`);
+				resolve();
+			}
+		};
+
+		const resumeRead = () => {
+			if (paused && pendingOps < 8 && !failed) {
+				paused = false;
+				readChunk();
+			}
+		};
+
+		const unzip = new Unzip((file) => {
+			if (file.name.endsWith('/')) return;
+
+			const relativePath = file.name.replace(/^\.?\//, '');
+			fileCount++;
+			if (fileCount === 1 || fileCount % 500 === 0) {
+				diagnostic(`[io] ZIP part ${part}/${TOTAL_PARTS}: streaming file ${fileCount}: ${relativePath}`);
+			}
+
+			let writeOffset = 0;
+			pendingOps++;
+			let opChain = openOPFSWriteHandle(rootDir, relativePath).then((handle) => {
+				pendingOps--;
+				resumeRead();
+				return handle;
+			});
+
+			file.ondata = (err, chunk, final) => {
+				if (err) {
+					opChain.then((h) => h && h.close()).catch(() => {});
+					return fail(err);
+				}
+
+				pendingOps++;
+				opChain = opChain.then((accessHandle) => {
+					if (failed) {
+						if (accessHandle) accessHandle.close();
+						return null;
+					}
+					if (chunk && chunk.length > 0) {
+						accessHandle.write(chunk, { at: writeOffset });
+						writeOffset += chunk.length;
+						totalBytes += chunk.length;
+					}
+					if (performance.now() - lastProgressLog > 5000) {
+						lastProgressLog = performance.now();
+						diagnostic(`[io] ZIP part ${part}/${TOTAL_PARTS}: ${(totalBytes / 1048576).toFixed(1)} MB written (${relativePath})...`);
+					}
+					if (final) {
+						accessHandle.flush();
+						accessHandle.close();
+						return null;
+					}
+					return accessHandle;
+				}).finally(() => {
+					pendingOps--;
+					resumeRead();
+					finish();
+				}).catch((e) => {
+					fail(e);
+				});
+			};
+
+			file.start();
+		});
+		unzip.register(UnzipInflate);
+
+		function readChunk() {
+			if (failed) return;
+			reader.read().then(({ done, value }) => {
+				if (done) {
+					inputDone = true;
+					try {
+						unzip.flush();
+						finish();
+					} catch (error) {
+						fail(error);
+					}
+					return;
+				}
+				try {
+					unzip.push(value);
+				} catch (error) {
+					return fail(error);
+				}
+				if (pendingOps >= 8) {
+					paused = true;
+				} else {
+					readChunk();
+				}
+			}).catch(fail);
+		}
+
+		readChunk();
+	});
+}
+
 async function saveFileToOPFS(rootDir, filePath, uint8Data) {
-  const accessHandle = await openOPFSWriteHandle(rootDir, filePath);
-  try {
-    if (uint8Data && uint8Data.length > 0) {
-      accessHandle.write(uint8Data, { at: 0 });
-    }
-    accessHandle.flush();
-  } finally {
-    accessHandle.close();
-  }
+	const accessHandle = await openOPFSWriteHandle(rootDir, filePath);
+	try {
+		if (uint8Data && uint8Data.length > 0) {
+			accessHandle.write(uint8Data, { at: 0 });
+		}
+		accessHandle.flush();
+	} finally {
+		accessHandle.close();
+	}
 }
 
 function concatTypedArrays(arrays) {
-  let totalLength = arrays.reduce((acc, curr) => acc + curr.length, 0);
-  let output = new Uint8Array(totalLength);
-  let length = 0;
-  for (let array of arrays) {
-    output.set(array, length);
-    length += array.length;
-  }
-  return output;
+	let totalLength = arrays.reduce((acc, curr) => acc + curr.length, 0);
+	let output = new Uint8Array(totalLength);
+	let length = 0;
+	for (let array of arrays) {
+		output.set(array, length);
+		length += array.length;
+	}
+	return output;
 }
 
 // ---- boot read set: recorded with ?record=1, replayed at page load ----------------------------------------------------------------------------------------
@@ -506,17 +606,17 @@ async function prefetch(name) {
 	log('[io] prefetching the boot set: ' + set.length + ' files, ' + runs.length + ' ranges, ' + batches.length + ' compressed batches');
 	let nextRun = 0, nextBatch = 0;
 	const runLane = async () => {
-  while (isOffline() && nextRun < runs.length) {
-    const r = runs[nextRun++];
-    try { await ensureBlocks(r.id, r.a, r.b, true); } catch (e) { log('[io] prefetch failed: ' + e.message); }
-  }
-};
-const batchLane = async () => {
-  while (isOffline() && nextBatch < batches.length) {
-    const full = batches[nextBatch++], wanted = new Set(full.filter((it) => untouched(it.id, files[it.id])).map((it) => it.id));
-    try { if (wanted.size) await batchFetch(full, true, wanted); } catch (e) { log('[io] prefetch failed: ' + e.message); }
-  }
-};
+		while (isOffline() && nextRun < runs.length) {
+			const r = runs[nextRun++];
+			try { await ensureBlocks(r.id, r.a, r.b, true); } catch (e) { log('[io] prefetch failed: ' + e.message); }
+		}
+	};
+	const batchLane = async () => {
+		while (isOffline() && nextBatch < batches.length) {
+			const full = batches[nextBatch++], wanted = new Set(full.filter((it) => untouched(it.id, files[it.id])).map((it) => it.id));
+			try { if (wanted.size) await batchFetch(full, true, wanted); } catch (e) { log('[io] prefetch failed: ' + e.message); }
+		}
+	};
 	await Promise.all([...Array.from({ length: RUN_LANES }, runLane), ...Array.from({ length: BATCH_LANES }, batchLane)]);
 	console.info(`[io] Boot set prefetched in ${((performance.now() - t0) / 1000).toFixed(1)} s; ${(statTotal / 1048576).toFixed(1)} MB fetched so far.`);
 	log('[io] boot set prefetched in ' + ((performance.now() - t0) / 1000 | 0) + ' s, ' + (statTotal / 1048576 | 0) + ' MB fetched so far; ' + (netStat.batchCached || 0) + ' of ' + batches.length + ' batches from the host\'s static copies, ' + (netStat.retries || 0) + ' retried requests');
@@ -745,7 +845,7 @@ async function serve(slot) {
 				logDirectRead(f, off, off + len - 1);
 			}
 			if (!isOffline() && (!sh || !cacheEnabled)) {
-  				result = await readFromNetwork(id, off, len, dst);
+				result = await readFromNetwork(id, off, len, dst);
 			} else if (sh) {
 				// read-ahead: a read that continues the previous one of this file (a sequential scan) also fetches the next bytes, doubling up to MAX_AHEAD; anything else fetches only what it needs
 				const st = seq.get(id) || { end: -1, ahead: 0 };
@@ -886,7 +986,7 @@ async function init(m) {
 	if (!m.noStore) await openStore(Number(String(j.version).replace(/\D/g, '')) || 0);
 	else diagnostic('[io] Persistent game-file block cache disabled; file reads will use the network.');
 	if (sh && isOffline() && m.bootset && !m.record) prefetch(m.bootset);
-else console.info('[io] Boot-set prefetch skipped:', !sh ? 'persistent store unavailable' : !isOffline() ? 'network mode active' : 'recording mode enabled');
+	else console.info('[io] Boot-set prefetch skipped:', !sh ? 'persistent store unavailable' : !isOffline() ? 'network mode active' : 'recording mode enabled');
 }
 
 // The page tells us when it is going away (pagehide): close the handles at once so the next load can take them.
