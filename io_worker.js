@@ -221,6 +221,8 @@ const PROXY_PART_01_URL = '/release-proxy/v1/playgta5-part-01-of-14.zip';
 const PROXY_PARTS_BASE_URL = '/release-proxy/v2/playgta5-part-';
 const LOCAL_ZIP_PROXY = 'https://gta-web-ipad.pages.dev';
 const ioWorkerUrl = new URL(self.location.href);
+const forceOffline = ioWorkerUrl.searchParams.get('offline') === '1';
+const isOffline = () => forceOffline || !navigator.onLine;
 const useLocalZipProxy = false;
 const localZipPart1Base = ioWorkerUrl.searchParams.get('zip1') || '';
 const localZipRestBase = ioWorkerUrl.searchParams.get('ziprest') || '';
@@ -554,17 +556,17 @@ async function prefetch(name) {
 	log('[io] prefetching the boot set: ' + set.length + ' files, ' + runs.length + ' ranges, ' + batches.length + ' compressed batches');
 	let nextRun = 0, nextBatch = 0;
 	const runLane = async () => {
-		while (!navigator.onLine && nextRun < runs.length) {
-			const r = runs[nextRun++];
-			try { await ensureBlocks(r.id, r.a, r.b, true); } catch (e) { log('[io] prefetch failed: ' + e.message); }		// blocks already stored or on their way cost nothing
-		}
-	};
-	const batchLane = async () => {
-		while (!navigator.onLine && nextBatch < batches.length) {
-			const full = batches[nextBatch++], wanted = new Set(full.filter((it) => untouched(it.id, files[it.id])).map((it) => it.id));		// files the engine already fetched meanwhile are dropped from the answer, not from the request: the request is the same for everybody
-			try { if (wanted.size) await batchFetch(full, true, wanted); } catch (e) { log('[io] prefetch failed: ' + e.message); }
-		}
-	};
+  while (isOffline() && nextRun < runs.length) {
+    const r = runs[nextRun++];
+    try { await ensureBlocks(r.id, r.a, r.b, true); } catch (e) { log('[io] prefetch failed: ' + e.message); }
+  }
+};
+const batchLane = async () => {
+  while (isOffline() && nextBatch < batches.length) {
+    const full = batches[nextBatch++], wanted = new Set(full.filter((it) => untouched(it.id, files[it.id])).map((it) => it.id));
+    try { if (wanted.size) await batchFetch(full, true, wanted); } catch (e) { log('[io] prefetch failed: ' + e.message); }
+  }
+};
 	await Promise.all([...Array.from({ length: RUN_LANES }, runLane), ...Array.from({ length: BATCH_LANES }, batchLane)]);
 	console.info(`[io] Boot set prefetched in ${((performance.now() - t0) / 1000).toFixed(1)} s; ${(statTotal / 1048576).toFixed(1)} MB fetched so far.`);
 	log('[io] boot set prefetched in ' + ((performance.now() - t0) / 1000 | 0) + ' s, ' + (statTotal / 1048576 | 0) + ' MB fetched so far; ' + (netStat.batchCached || 0) + ' of ' + batches.length + ' batches from the host\'s static copies, ' + (netStat.retries || 0) + ' retried requests');
@@ -792,8 +794,8 @@ async function serve(slot) {
 			} else {
 				logDirectRead(f, off, off + len - 1);
 			}
-			if (navigator.onLine && (!sh || !cacheEnabled)) {
-				result = await readFromNetwork(id, off, len, dst);
+			if (!isOffline() && (!sh || !cacheEnabled)) {
+  				result = await readFromNetwork(id, off, len, dst);
 			} else if (sh) {
 				// read-ahead: a read that continues the previous one of this file (a sequential scan) also fetches the next bytes, doubling up to MAX_AHEAD; anything else fetches only what it needs
 				const st = seq.get(id) || { end: -1, ahead: 0 };
@@ -859,7 +861,7 @@ function pumpHints() {
 }
 function drainHints(bell) {
 	const ring = Atomics.load(HEAP32, bell + 2), cap = Atomics.load(HEAP32, bell + 3);
-	if (!ring || !cap || !sh || noHints || navigator.onLine) return;		// no store to fetch into, or ?nohints=1, or online
+	if (!ring || !cap || !sh || noHints || !isOffline()) return;		// no store to fetch into, or ?nohints=1, or online
 	const head = Atomics.load(HEAP32, bell + 4) >>> 0;
 	let tail = Atomics.load(HEAP32, bell + 5) >>> 0;
 	if (((head - tail) >>> 0) > cap) tail = (head - cap) >>> 0;		// the engine lapped us: the oldest hints were overwritten
@@ -897,7 +899,7 @@ let ready = null;
 async function init(m) {
 	base = m.base; bc = new BroadcastChannel('game-progress'); remoteLog = !!m.log; noHints = !!m.noHints;
 	cacheEnabled = !m.noStore;
-	diagnostic(`[io] Initialization: manifest base ${base}; game-file cache ${cacheEnabled ? 'enabled' : 'disabled'}; online ${navigator.onLine}; OPFS support ${!!navigator.storage?.getDirectory}; local ZIP ${useLocalZipProxy ? 'enabled' : 'disabled'}.`);
+	diagnostic(`[io] Initialization: manifest base ${base}; game-file cache ${cacheEnabled ? 'enabled' : 'disabled'}; offline ${isOffline()}; OPFS support ${!!navigator.storage?.getDirectory}; local ZIP ${useLocalZipProxy ? 'enabled' : 'disabled'}.`);
 	diagnostic('[io] Checking extracted game-data cache in OPFS.');
 	const rootDir = await navigator.storage.getDirectory();
 	const isCached = await verifyOPFSCache(rootDir);
@@ -933,8 +935,8 @@ async function init(m) {
 	if (remoteLog) startNetStats();
 	if (!m.noStore) await openStore(Number(String(j.version).replace(/\D/g, '')) || 0);
 	else diagnostic('[io] Persistent game-file block cache disabled; file reads will use the network.');
-	if (sh && !navigator.onLine && m.bootset && !m.record) prefetch(m.bootset);
-	else console.info('[io] Boot-set prefetch skipped:', !sh ? 'persistent store unavailable' : navigator.onLine ? 'network available' : 'recording mode enabled');
+	if (sh && isOffline() && m.bootset && !m.record) prefetch(m.bootset);
+else console.info('[io] Boot-set prefetch skipped:', !sh ? 'persistent store unavailable' : !isOffline() ? 'network mode active' : 'recording mode enabled');
 }
 
 // The page tells us when it is going away (pagehide): close the handles at once so the next load can take them.
