@@ -1,4 +1,2 @@
 /data/manifest.json /data-manifest.json 200
-/release-proxy/v1/* https://github.com/jinnyguin/gta-web-ipad/releases/download/files/:splat 302
-/release-proxy/v2/* https://github.com/alihammoud21/playgta5/releases/download/full-game-v1/:splat 302
 /game-memory32.js  /mirror/playgta5.com/b/8b0b5899ed/game-memory32.js  200
