@@ -31,8 +31,11 @@ let cacheEnabled = false;
 const BS = 4096, MAX_RUN = 256, MAX_AHEAD = 512 * 1024, FIRST_AHEAD = 64 * 1024, AHEAD_MIN_READ = 65536;
 const MBS = 262144;		// block size of the memory-only fallback (no store)
 let remoteLog = false;		// ?log=1 on the page (loader.js passes it in the init message): this worker's diagnostics go to the dev server
-function log(text) { if (remoteLog) fetch('/log', { method: 'POST', body: text }).catch(() => {}); }
+
+// Removed server side logs
+function log(text) {}
 let diagnosticChannel;
+
 function diagnostic(text) {
 	console.info(text);
 	(diagnosticChannel || (diagnosticChannel = new BroadcastChannel('game-log'))).postMessage(text);
@@ -496,11 +499,9 @@ async function prefetch(name) {
 		const id = pathIndex.get(path);
 		if (id === undefined) continue;
 		const f = files[id], lastBlock = Math.ceil(f.size / BS) - 1;
-		if (COMPRESSIBLE.test(f.path) && f.size <= WHOLE_MAX) {		// small compressible files: whole files, several per request, compressed by the server
-			cbatch.push({ id, a: 0, b: lastBlock }); cbytes += f.size;
-			if (cbytes >= 4194304 || cbatch.length >= 300) { batches.push(cbatch); cbatch = []; cbytes = 0; }
-			continue;
-		}
+		
+		// Removed server only batching for static functionality
+
 		let cur = null;
 		for (const [x, y] of ranges) {
 			const a = Math.floor(x / BS), b = Math.min(Math.floor(y / BS), lastBlock);
@@ -928,7 +929,7 @@ async function userdataWrite(path, record) {
 		});
 		log('[io] userdata ' + (record ? 'stored ' + path + ' (' + record.data.length + ' bytes)' : 'deleted ' + path));
 	} catch (e) {
-		fetch('/log', { method: 'POST', body: '[io] userdata ' + path + ' NOT stored (the save will be lost when the tab closes): ' + e }).catch(() => {});		// whatever ?log=1 says: a lost save is worth a line
+		console.warn('[io] userdata ' + path + ' NOT stored (the save will be lost when the tab closes): ' + e);
 	}
 }
 
