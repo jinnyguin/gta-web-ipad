@@ -241,7 +241,8 @@ async function downloadAndExtractPipeline(rootDir) {
       ? PROXY_PART_01_URL
       : `${PROXY_PARTS_BASE_URL}${String(i).padStart(2, '0')}-of-${TOTAL_PARTS}.zip`;
     const fileUrl = new URL(useLocalZipProxy ? LOCAL_ZIP_PROXY + releaseUrl : releaseUrl, self.location.href);
-    if (useLocalZipProxy) fileUrl.searchParams.set('sourceBase', i === 1 ? localZipPart1Base : localZipRestBase);
+    // Remove query lines
+	//if (useLocalZipProxy) fileUrl.searchParams.set('sourceBase', i === 1 ? localZipPart1Base : localZipRestBase);
 
     const partName = `playgta5-part-${String(i).padStart(2, '0')}-of-${TOTAL_PARTS}.zip`;
     const partStarted = performance.now();
@@ -458,12 +459,12 @@ function batchFetch(runsIn, compressed, wanted) {
 		let cached = false;
 		if (compressed && dataVersion && self.crypto && crypto.subtle && typeof DecompressionStream !== 'undefined') {
 			try {
-				const res = await fetch(base + 'batchc/' + await sha1Hex(dataVersion + ':' + body) + '.bin' + dataQuery, { priority: 'low' });
+				const res = await fetch(base + 'batchc/' + await sha1Hex(dataVersion + ':' + body) + '.bin', { priority: 'low' });
 				if (res.ok && res.body) { await consume(res.body.pipeThrough(new DecompressionStream('gzip')).getReader()); cached = true; netStat.batchCached = (netStat.batchCached || 0) + 1; }
 			} catch (e) { /* not built yet or unusable: the POST below builds and sends it (blocks written so far are written again at the same places) */ }
 		}
 		if (!cached) {
-			const res = await fetchRetry(base + (compressed ? 'batch?gz=1' + (dataVersion ? '&c=1&v=' + encodeURIComponent(dataVersion) : '') : 'batch'), { method: 'POST', priority: 'low', body });
+			const res = await fetchRetry(base + 'batch', { method: 'POST', priority: 'low', body });
 			if (!res.ok) throw new Error('HTTP ' + res.status + ' for a batch');
 			// the length of each range as sent (a range is clamped at the end of the server's copy of the file); without the header, the lengths asked for
 			const sent = (res.headers.get('X-Run-Lengths') || '').split(',').map(Number);
@@ -886,7 +887,7 @@ async function init(m) {
 		throw error;
 	}
 	files = j.files.map((f) => ({ path: f[0], size: f[1] }));
-	dataQuery = j.version ? '?v=' + encodeURIComponent(j.version) : ''; dataVersion = j.version ? String(j.version) : '';
+	dataQuery = ''; dataVersion = j.version ? String(j.version) : '';
 	files.forEach((f, i) => pathIndex.set(f.path, i));
 	diagnostic(`[io] Loaded manifest version ${j.version || '(unspecified)'} with ${files.length} files; first path ${files[0]?.path || '(none)'}; total declared size ${(files.reduce((sum, f) => sum + f.size, 0) / 1048576).toFixed(1)} MB.`);
 	recording = !!m.record; traceOn = !!m.trace;
