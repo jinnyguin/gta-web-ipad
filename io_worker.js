@@ -353,6 +353,17 @@ function decompressZipStream(stream, rootDir, part) {
     readChunk();
   });
 }
+async function saveFileToOPFS(rootDir, filePath, uint8Data) {
+  const accessHandle = await openOPFSWriteHandle(rootDir, filePath);
+  try {
+    if (uint8Data && uint8Data.length > 0) {
+      accessHandle.write(uint8Data, { at: 0 });
+    }
+    accessHandle.flush();
+  } finally {
+    accessHandle.close();
+  }
+}
 
 function concatTypedArrays(arrays) {
   let totalLength = arrays.reduce((acc, curr) => acc + curr.length, 0);
