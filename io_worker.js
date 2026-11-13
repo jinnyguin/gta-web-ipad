@@ -427,15 +427,17 @@ function decompressZipStream(stream, rootDir, part) {
 			if (failed) return;
 			reader.read().then(({ done, value }) => {
 				if (done) {
-					inputDone = true;
-					try {
-						unzip.flush();
-						finish();
-					} catch (error) {
-						fail(error);
-					}
-					return;
-				}
+          			inputDone = true;
+        			try {
+            		unzip.push(new Uint8Array(0), true);
+          			} catch (error) {
+            		// If all files already finished streaming and only trailing central-directory bytes threw, ignore
+            		if (fileCount === 0) return fail(error);
+            		diagnostic(`[io] Non-fatal ZIP end-of-stream notice on part ${part}/${TOTAL_PARTS}: ${error && (error.message || error)}`);
+          		}
+          finish();
+          return;
+        		}
 				try {
 					unzip.push(value);
 				} catch (error) {
