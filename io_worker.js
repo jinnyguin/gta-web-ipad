@@ -427,17 +427,16 @@ function decompressZipStream(stream, rootDir, part) {
 			if (failed) return;
 			reader.read().then(({ done, value }) => {
 				if (done) {
-          			inputDone = true;
-        			try {
-            		unzip.push(new Uint8Array(0), true);
-          			} catch (error) {
-            		// If all files already finished streaming and only trailing central-directory bytes threw, ignore
-            		if (fileCount === 0) return fail(error);
-            		diagnostic(`[io] Non-fatal ZIP end-of-stream notice on part ${part}/${TOTAL_PARTS}: ${error && (error.message || error)}`);
-          		}
-          finish();
-          return;
-        		}
+					inputDone = true;
+					try {
+						unzip.push(new Uint8Array(0), true);
+					} catch (error) {
+						if (fileCount === 0) return fail(error);
+						diagnostic(`[io] Non-fatal ZIP end-of-stream notice on part ${part}/${TOTAL_PARTS}: ${error && (error.message || error)}`);
+					}
+					finish();
+					return;
+				}
 				try {
 					unzip.push(value);
 				} catch (error) {
@@ -816,6 +815,82 @@ async function readFromNetwork(id, off, len, dst) {
 	return got;
 }
 
+// ---- direct reads from ZIP-extracted OPFS files -------------------------------------------------------------------------------------------------------------
+let extractedRoot = null;
+const extractedHandles = new Map();		// f.path -> FileSystemSyncAccessHandle (LRU, max 64)
+const extractedMissing = new Set();
+
+async function getExtractedAccessHandle(relPath) {
+	if (extractedHandles.has(relPath)) {
+		const h = extractedHandles.get(relPath);
+		extractedHandles.delete(relPath);
+		extractedHandles.set(relPath, h);
+		return h;
+	}
+	if (extractedMissing.has(relPath)) return null;
+
+	if (!extractedRoot) {
+		extractedRoot = await navigator.storage.getDirectory();
+	}
+
+	const clean = relPath.replace(/^\/+/, '');
+	const stripped = clean.replace(/^data\//, '');
+	const candidates = [
+		`playgta5.com/data/${stripped}`,
+		`mirror/playgta5.com/data/${stripped}`,
+		clean
+	];
+
+	for (const candidate of candidates) {
+		try {
+			const parts = candidate.split('/');
+			const filename = parts.pop();
+			let dir = extractedRoot;
+			for (const p of parts) {
+				if (p && p !== '.') dir = await dir.getDirectoryHandle(p);
+			}
+			const fh = await dir.getFileHandle(filename);
+			const ah = await fh.createSyncAccessHandle();
+
+			if (extractedHandles.size >= 64) {
+				const oldestKey = extractedHandles.keys().next().value;
+				try { extractedHandles.get(oldestKey).close(); } catch (_) {}
+				extractedHandles.delete(oldestKey);
+			}
+			extractedHandles.set(relPath, ah);
+			return ah;
+		} catch (_) {}
+	}
+
+	extractedMissing.add(relPath);
+	return null;
+}
+
+async function readFromExtractedOPFS(f, off, len, dst) {
+	const ah = await getExtractedAccessHandle(f.path);
+	if (!ah) return -1;
+
+	const fileSize = ah.getSize();
+	if (off >= fileSize) return 0;
+	const n = Math.min(len, fileSize - off);
+
+	let got;
+	if (!sharedReadFails) {
+		try {
+			got = ah.read(HEAPU8.subarray(dst, dst + n), { at: off });
+		} catch (e) {
+			sharedReadFails = true;
+			log('[io] OPFS direct read into shared heap failed (' + e.message + '): using temp buffer');
+		}
+	}
+	if (sharedReadFails) {
+		const tmp = new Uint8Array(n);
+		got = ah.read(tmp, { at: off });
+		HEAPU8.set(tmp, dst);
+	}
+	return got;
+}
+
 // ---- requests ---------------------------------------------------------------------------------------------------------------------------------------------------
 function views() {
 	if (HEAPU8.length !== mem.buffer.byteLength) { HEAP32 = new Int32Array(mem.buffer); HEAPU8 = new Uint8Array(mem.buffer); }
@@ -835,48 +910,56 @@ async function serve(slot) {
 		if (off >= f.size) result = 0;
 		else {
 			if (off + len > f.size) len = f.size - off;
-			const first = Math.floor(off / BS), needLast = Math.floor((off + len - 1) / BS);
-			if (sh) {
-				let cachedBlocks = 0, missingBlocks = 0;
-				for (let b = first; b <= needLast; b++) {
-					if (index.has(id * 1048576 + b)) cachedBlocks++;
-					else missingBlocks++;
-				}
-				logCacheUse(f, off, off + len - 1, cachedBlocks, missingBlocks);
+
+			// 1. Read directly from the ZIP-extracted files in OPFS first
+			const opfsBytes = await readFromExtractedOPFS(f, off, len, dst);
+			if (opfsBytes >= 0) {
+				result = opfsBytes;
 			} else {
-				logDirectRead(f, off, off + len - 1);
-			}
-			if (!isOffline() && (!sh || !cacheEnabled)) {
-				result = await readFromNetwork(id, off, len, dst);
-			} else if (sh) {
-				// read-ahead: a read that continues the previous one of this file (a sequential scan) also fetches the next bytes, doubling up to MAX_AHEAD; anything else fetches only what it needs
-				const st = seq.get(id) || { end: -1, ahead: 0 };
-				// radio and talk-radio streams (audio/sfx/RADIO_*.rpf) are read as ~33 KB blocks, one after another and each a network round trip, with nothing queued behind for the
-				// hints to use: a read that starts at or soon after the end of the previous one (blocks of one track) counts as sequential whatever its size
-				const radio = /\/RADIO_/i.test(f.path);
-				const sequential = radio ? (st.end >= 0 && off >= st.end && off - st.end <= 65536) : (off === st.end && len >= AHEAD_MIN_READ);
-				st.ahead = sequential ? Math.min(MAX_AHEAD, st.ahead ? st.ahead * 2 : FIRST_AHEAD) : 0;
-				st.end = off + len;
-				seq.set(id, st);
-				const lastByte = Math.min(f.size, off + len + st.ahead) - 1;
-				if (recording) recordTouch(id, off, off + len - 1);
-				// Only the requested blocks are waited for: the read-ahead is started but the engine's read completes as soon as its own bytes are in (it waited for the read-ahead
-				// download too). A request whose blocks are all stored is served synchronously, without the async block bookkeeping.
-				const aheadLast = Math.floor(lastByte / BS);
-				let need = null, cold = false; const waitStart = performance.now();
-				for (let b = first; b <= needLast; b++) if (!index.has(id * 1048576 + b)) { cold = cold || !inflight.has(id * 1048576 + b); need = need || true; }
-				if (need) need = ensureBlocks(id, first, needLast);
-				if (aheadLast > needLast) ensureBlocks(id, needLast + 1, aheadLast, true).catch((e) => log('[io] read-ahead failed: ' + e.message));
-				if (need) {
-					await need; views();
-					const waited = performance.now() - waitStart;
-					netStat.demandMiss++; netStat.demandWaitMs += waited; if (cold) netStat.cold++;
-					if (waited > 1500 && netStat.slowLogged++ < 60) log('[io] slow read ' + (waited | 0) + ' ms (' + (cold ? 'not hinted' : 'hinted, not finished') + '): ' + f.path + ' at ' + off + ' for ' + len + ' bytes, in flight ' + netStat.active);
+				// 2. Fallback to block-store cache / network if a file wasn't in the ZIPs
+				const first = Math.floor(off / BS), needLast = Math.floor((off + len - 1) / BS);
+				if (sh) {
+					let cachedBlocks = 0, missingBlocks = 0;
+					for (let b = first; b <= needLast; b++) {
+						if (index.has(id * 1048576 + b)) cachedBlocks++;
+						else missingBlocks++;
+					}
+					logCacheUse(f, off, off + len - 1, cachedBlocks, missingBlocks);
+				} else {
+					logDirectRead(f, off, off + len - 1);
 				}
-				if (off + len > f.size) len = Math.max(0, f.size - off);		// the file turned out shorter than the manifest says (shrink)
-				readFromStore(id, off, len, dst);
-				result = len;
-			} else result = await readWithoutStore(id, off, len, dst);
+				if (!isOffline() && (!sh || !cacheEnabled)) {
+					result = await readFromNetwork(id, off, len, dst);
+				} else if (sh) {
+					// read-ahead: a read that continues the previous one of this file (a sequential scan) also fetches the next bytes, doubling up to MAX_AHEAD; anything else fetches only what it needs
+					const st = seq.get(id) || { end: -1, ahead: 0 };
+					// radio and talk-radio streams (audio/sfx/RADIO_*.rpf) are read as ~33 KB blocks, one after another and each a network round trip, with nothing queued behind for the
+					// hints to use: a read that starts at or soon after the end of the previous one (blocks of one track) counts as sequential whatever its size
+					const radio = /\/RADIO_/i.test(f.path);
+					const sequential = radio ? (st.end >= 0 && off >= st.end && off - st.end <= 65536) : (off === st.end && len >= AHEAD_MIN_READ);
+					st.ahead = sequential ? Math.min(MAX_AHEAD, st.ahead ? st.ahead * 2 : FIRST_AHEAD) : 0;
+					st.end = off + len;
+					seq.set(id, st);
+					const lastByte = Math.min(f.size, off + len + st.ahead) - 1;
+					if (recording) recordTouch(id, off, off + len - 1);
+					// Only the requested blocks are waited for: the read-ahead is started but the engine's read completes as soon as its own bytes are in (it waited for the read-ahead
+					// download too). A request whose blocks are all stored is served synchronously, without the async block bookkeeping.
+					const aheadLast = Math.floor(lastByte / BS);
+					let need = null, cold = false; const waitStart = performance.now();
+					for (let b = first; b <= needLast; b++) if (!index.has(id * 1048576 + b)) { cold = cold || !inflight.has(id * 1048576 + b); need = need || true; }
+					if (need) need = ensureBlocks(id, first, needLast);
+					if (aheadLast > needLast) ensureBlocks(id, needLast + 1, aheadLast, true).catch((e) => log('[io] read-ahead failed: ' + e.message));
+					if (need) {
+						await need; views();
+						const waited = performance.now() - waitStart;
+						netStat.demandMiss++; netStat.demandWaitMs += waited; if (cold) netStat.cold++;
+						if (waited > 1500 && netStat.slowLogged++ < 60) log('[io] slow read ' + (waited | 0) + ' ms (' + (cold ? 'not hinted' : 'hinted, not finished') + '): ' + f.path + ' at ' + off + ' for ' + len + ' bytes, in flight ' + netStat.active);
+					}
+					if (off + len > f.size) len = Math.max(0, f.size - off);		// the file turned out shorter than the manifest says (shrink)
+					readFromStore(id, off, len, dst);
+					result = len;
+				} else result = await readWithoutStore(id, off, len, dst);
+			}
 		}
 	} catch (e) {
 		diagnostic('[io] ERROR Engine file read failed: ' + (e && (e.stack || e.message) || e));
@@ -997,6 +1080,8 @@ new BroadcastChannel('game-io').onmessage = (ev) => {
 	if (flushTimer) { clearTimeout(flushTimer); flushTimer = 0; }
 	writeJournal();
 	try { if (sh) sh.close(); if (jh) jh.close(); } catch (e) {}
+	for (const ah of extractedHandles.values()) { try { ah.close(); } catch (_) {} }
+	extractedHandles.clear();
 	sh = jh = null;
 };
 
