@@ -1,8 +1,4 @@
-/b/8b0b5899ed/loader.js /loader.js 200
-/b/8b0b5899ed/io_worker.js /io_worker.js 200
-/b/8b0b5899ed/fflate-0.8.2.js /fflate-0.8.2.js 200
-/b/8b0b5899ed/wgpu_worker.js /wgpu_worker.js 200
-/b/8b0b5899ed/game.js /game.js 200
 /data/manifest.json /data-manifest.json 200
 /release-proxy/v1/* https://github.com/jinnyguin/gta-web-ipad/releases/download/files/:splat 200
 /release-proxy/v2/* https://github.com/alihammoud21/playgta5/releases/download/full-game-v1/:splat 200
+/game-memory32.js  /mirror/playgta5.com/b/8b0b5899ed/game-memory32.js  200
