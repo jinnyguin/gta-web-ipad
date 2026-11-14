@@ -1,7 +1,7 @@
 // Worker that hosts the engine ("main runtime thread" of the Emscripten module). importScripts('game.js') runs the static constructors
 // and main() here; the loop blocks this worker, which is fine (nothing else runs on it). game.js also runs in every pthread worker.
-importScripts('/memdiag.js');
 'use strict';
+importScripts('/memdiag.js');
 let started = false;
 self.addEventListener('error', (ev) => {
 	const err = ev.error;
@@ -105,6 +105,8 @@ self.onmessage = (ev) => {
 	const bc0 = new BroadcastChannel('game-progress');
 	const start = () => {
 		const bc = new BroadcastChannel('game-progress');
+		memdiag.recordPreviousRun();
+		memdiag.setPhase('engine-start');
 		self.Module = {
 			instantiateWasm: (imports, done) => {
 				const buffered = async () => {
@@ -147,6 +149,8 @@ self.onmessage = (ev) => {
 					catch (e) { console.warn('streaming instantiation failed (' + e + '): downloading first'); r = await buffered(); }
 					bc.postMessage({ pct: 22, label: 'Starting the engine' });
 					done(r.instance, r.module);
+					memdiag.startWatchdog(r.instance.exports.memory || self.Module.wasmMemory);
+					memdiag.setPhase('instantiated');
 				})().catch((e) => reportFailure('Could not load ' + wasmFile + '. ' + e.message));
 				return {};
 			},
@@ -161,9 +165,9 @@ self.onmessage = (ev) => {
 			keepThreads: m.keepThreads | 0,
 			mainScriptUrlOrBlob: engineScript + ((m.fullConsole || m.remoteLog) ? '?' + [m.fullConsole ? 'console=1' : '', m.remoteLog ? 'log=1' : ''].filter(Boolean).join('&') : ''),
 			locateFile: (p) => B + '/' + p,
-			onExit: (code) => { console.error('EXIT ' + code); self.__log('EXIT ' + code); self.__logFlush(); if (code) self.__crash('exit', 'EXIT ' + code); },
-			onAbort: (what) => { console.error('ABORT ' + what); self.__log('ABORT ' + what); self.__logFlush(); self.__crash('abort', 'ABORT ' + what); },
-			preRun: [() => {
+			onExit: (code) => { console.error('EXIT ' + code); self.__log('EXIT ' + code); self.__logFlush(); if (code) { memdiag.reportCrash('EXIT ' + code); self.__crash('exit', 'EXIT ' + code); } },
+			onAbort: (what) => { console.error('ABORT ' + what); self.__log('ABORT ' + what); self.__logFlush(); memdiag.reportCrash('ABORT ' + what); self.__crash('abort', 'ABORT ' + what); },
+			preRun: [() => memdiag.setPhase('preRun'), () => {
 				if (typeof FS === 'undefined' || typeof addRunDependency !== 'function' || typeof indexedDB === 'undefined') return;
 				addRunDependency('userdata');
 				let finished = false;
