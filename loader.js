@@ -2,6 +2,18 @@
 // and main() here; the loop blocks this worker, which is fine (nothing else runs on it). game.js also runs in every pthread worker.
 'use strict';
 let started = false;
+self.addEventListener('error', (ev) => {
+	const err = ev.error;
+	const detail = err ? `${err.name}: ${err.message}\n${err.stack || ''}` : `${ev.message} (${ev.filename}:${ev.lineno}:${ev.colno})`;
+	diagnostic('[loader] UNCAUGHT ERROR: ' + detail);
+	self.postMessage({ error: detail });
+});
+self.addEventListener('unhandledrejection', (ev) => {
+	const err = ev.reason;
+	const detail = err ? `${err.name || 'Error'}: ${err.message || err}\n${err.stack || ''}` : String(ev.reason);
+	diagnostic('[loader] UNHANDLED REJECTION: ' + detail);
+	self.postMessage({ error: detail });
+});
 let diagnosticChannel;
 function diagnostic(text) {
 	console.info(text);
