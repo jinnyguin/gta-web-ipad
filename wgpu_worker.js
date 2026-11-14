@@ -23,6 +23,8 @@
 // Node needs the `webgpu` npm package (Dawn). Its location: env WGPU_NODE_MODULE, default D:/wasm_build/shaders/node/node_modules/webgpu.
 
 'use strict';
+// memdiag: per-thread wasm grow hook (see memdiag.js). Harmless if the file is absent.
+if (typeof importScripts === 'function') { try { importScripts('/memdiag.js'); memdiag.installGrowHook('wgpu'); } catch (e) { /* no diagnostics */ } }
 
 const RING_DATA = 64;
 // keep in sync with wgpu_backend.h
@@ -722,7 +724,7 @@ function targetView(t, dxgi, mip, slice, dimension) {
 }
 
 // ---- uniform ring: constant buffers are copied per draw (D3D11 semantics) and bound with dynamic offsets ----------------------------------
-const RING_CHUNK = 8 << 20, UBO_WINDOW = 65536;
+const RING_CHUNK = 4 << 20, UBO_WINDOW = 65536;
 // Frames in flight: the uniform ring has one slot per frame; before a slot is reused the GPU must be done with the frame that last used it. Chrome reports completion through the
 // wire from the GPU process, so with 3 slots (2 frames in flight) the round trip, not the work, capped the frame rate.
 const FRAME_SLOTS = (isNode ? +process.env.WGPU_SLOTS : +(new URLSearchParams(self.location.search).get('slots') || 0)) || 3;
@@ -1662,7 +1664,7 @@ let bgCreated = 0, bgCreated0 = 0, bgEvicted = 0;
 // Every cached bind group holds Direct3D descriptors (and references to the views/textures in it) until the JS object is collected. Keys contain resource ids, which are never reused,
 // so an entry whose texture was destroyed (streaming does this constantly) is dead weight that would otherwise live forever: in a long session that exhausted the descriptor heaps
 // (`CreateDescriptorHeap failed with E_OUTOFMEMORY`, device lost, black screen). Keep the newest BG_LIMIT; older ones are rebuilt on demand (cheap).
-const BG_LIMIT = 24000;
+const BG_LIMIT = 4000;
 function trimBindGroups() {
 	if (bindGroupCache.size <= BG_LIMIT * 1.5) return;
 	let drop = bindGroupCache.size - BG_LIMIT;
