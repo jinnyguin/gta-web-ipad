@@ -1,5 +1,6 @@
 // Worker that hosts the engine ("main runtime thread" of the Emscripten module). importScripts('game.js') runs the static constructors
 // and main() here; the loop blocks this worker, which is fine (nothing else runs on it). game.js also runs in every pthread worker.
+importScripts('/memdiag.js');
 'use strict';
 let started = false;
 self.addEventListener('error', (ev) => {
