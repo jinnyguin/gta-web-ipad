@@ -171,29 +171,31 @@ let stopTitle = () => {};
 {
 	const stage = document.getElementById('ls-stage'), holder = document.getElementById('ls-screens');
 	const titleAssetUrls = new Map();
-	const titleAssetsReady = new Promise((resolve) => {
-		const channel = new BroadcastChannel('game-progress');
-		channel.addEventListener('message', (event) => {
-			if (event.data?.assetsReady) {
-				channel.close();
-				resolve();
-			}
-		});
-	});
 	const titleAssetUrl = async (name) => {
-		const path = 'b/8b0b5899ed/title/art/' + name + '.webp';
-		if (!titleAssetUrls.has(path)) {
-			titleAssetUrls.set(path, (async () => {
-				await titleAssetsReady;
-				const root = await navigator.storage.getDirectory();
-				let directory = root;
-				const parts = path.split('/');
-				for (const part of parts.slice(0, -1)) directory = await directory.getDirectoryHandle(part);
-				const file = await (await directory.getFileHandle(parts[parts.length - 1])).getFile();
-				return URL.createObjectURL(file);
+		const relPath = 'b/8b0b5899ed/title/art/' + name + '.webp';
+		if (!titleAssetUrls.has(relPath)) {
+			titleAssetUrls.set(relPath, (async () => {
+				try {
+					const root = await navigator.storage.getDirectory();
+					const candidates = [
+						'mirror/playgta5.com/' + relPath,
+						'playgta5.com/' + relPath,
+						relPath
+					];
+					for (const candidate of candidates) {
+						try {
+							let directory = root;
+							const parts = candidate.split('/');
+							for (const part of parts.slice(0, -1)) directory = await directory.getDirectoryHandle(part);
+							const file = await (await directory.getFileHandle(parts[parts.length - 1])).getFile();
+							return URL.createObjectURL(file);
+						} catch (_) {}
+					}
+				} catch (_) {}
+				return '/mirror/playgta5.com/' + relPath;
 			})());
 		}
-		return titleAssetUrls.get(path);
+		return titleAssetUrls.get(relPath);
 	};
 	const fit = () => {
 		const s = Math.min(innerWidth / 1280, innerHeight / 720);
@@ -303,7 +305,11 @@ let stopTitle = () => {};
 		stopped = true;
 		clearTimeout(timer);
 		cancelAnimationFrame(raf);
-		for (const url of titleAssetUrls.values()) url.then((assetUrl) => URL.revokeObjectURL(assetUrl)).catch(() => {});
+		for (const url of titleAssetUrls.values()) {
+			url.then((assetUrl) => {
+				if (assetUrl && assetUrl.startsWith('blob:')) URL.revokeObjectURL(assetUrl);
+			}).catch(() => {});
+		}
 		titleAssetUrls.clear();
 	};
 }
