@@ -387,7 +387,9 @@ showModes();
 			return;
 		}
 		if (m.lines) {
-			if (loadingGone || !m.lines.length) return;
+			if (!m.lines.length) return;
+			for (const line of m.lines) console.log('[engine]', line);
+			if (loadingGone) return;
 			lastLine = m.lines[m.lines.length - 1];
 			dirty = true;
 			return;
