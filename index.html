@@ -537,7 +537,7 @@ function launchLoaderWorker() {
 		if (forced) return [+forced[1], +forced[2]];
 		const sc = Math.max(0.25, Math.min(2, +(q.get('scale') || 1)));
 		let w = innerWidth * devicePixelRatio * sc, h = innerHeight * devicePixelRatio * sc;
-		const cap = lowMemory ? [2560, 1440] : [3840, 2160], k = Math.min(1, cap[0] / w, cap[1] / h);
+		const cap = memory32 ? [1280, 720] : lowMemory ? [2560, 1440] : [3840, 2160], k = Math.min(1, cap[0] / w, cap[1] / h);
 		w *= k; h *= k;
 		return [Math.max(320, Math.round(w / 2) * 2), Math.max(240, Math.round(h / 2) * 2)];
 	};
